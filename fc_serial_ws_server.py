@@ -1,122 +1,351 @@
-﻿import asyncio
+"""
+LoRa bridge — single process owning the serial port.
+
+  WebSocket ws://127.0.0.1:8765  — downlink telemetry (FC / SH packets)
+  HTTP      http://127.0.0.1:8082 — uplink commands (config / recovery)
+"""
+import argparse
+import asyncio
 import json
+import struct
+import threading
 import time
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
 import serial
 import websockets
 
-SERIAL_PORT = "COM7"
-BAUD = 57600
-
+# ---------------------------------------------------------------------------
+# WebSocket state
+# ---------------------------------------------------------------------------
 WS_HOST = "127.0.0.1"
 WS_PORT = 8765
 
-clients = set()
+clients: set = set()
+
+# Link quality
+_heartbeat = 0
+_last_seq = None
+_total_expected = 0
+_total_received = 0
+_packet_loss = 0.0
+
+# ---------------------------------------------------------------------------
+# Shared serial port
+# ---------------------------------------------------------------------------
+_ser: serial.Serial | None = None
+_serial_write_lock = threading.Lock()
+
+# ---------------------------------------------------------------------------
+# Uplink protocol (mirrors uplink_command_server.py)
+# ---------------------------------------------------------------------------
+UPLINK_PROTOCOL_VERSION = 1
+UPLINK_CLASS_CONFIG      = 1
+UPLINK_CLASS_RECOVERY    = 4
+
+SCOPE_CFS_CORE_APP   = 1
+SCOPE_MAVLINK_BRIDGE = 2
+
+CONFIG_VERSION    = 1
+VALUE_TYPE_UINT32 = 0
+
+CFS_CORE_PARAMS = {
+    "attitude_timeout_ms": 0,
+    "local_timeout_ms":    1,
+    "gps_timeout_ms":      2,
+    "ekf_timeout_ms":      3,
+    "bridge_timeout_ms":   4,
+    "publish_period_ms":   5,
+}
+
+MAVLINK_BRIDGE_PARAMS = {
+    "attitude_interval_us":        0,
+    "local_position_interval_us":  1,
+    "global_position_interval_us": 2,
+    "gps_raw_interval_us":         3,
+    "ekf_status_interval_us":      4,
+    "reconnect_interval_ms":       5,
+    "heartbeat_interval_ms":       6,
+}
 
 
-def parse_int(value: str):
-    try:
-        return int(value)
-    except ValueError:
-        return None
+class _SeqCounter:
+    def __init__(self):
+        self._v = 1
+        self._lock = threading.Lock()
+
+    def next(self) -> int:
+        with self._lock:
+            v = self._v
+            self._v = (self._v % 0xFFFF) + 1
+            return v
 
 
-def parse_float(value: str):
-    try:
-        return float(value)
-    except ValueError:
-        return None
+_seq_counter = _SeqCounter()
 
 
-def parse_fc_line(line: str):
+def _crc16(data: bytes) -> int:
+    crc = 0xFFFF
+    for b in data:
+        crc ^= b << 8
+        for _ in range(8):
+            crc = ((crc << 1) ^ 0x1021) & 0xFFFF if crc & 0x8000 else (crc << 1) & 0xFFFF
+    return crc
+
+
+def _build_lora_frame(seq: int, payload: bytes, cmd_class: int, flags: int = 0) -> str:
+    payload_hex = payload.hex().upper()
+    canonical = f"UP,{UPLINK_PROTOCOL_VERSION},{cmd_class},{seq},{flags},{payload_hex}"
+    crc = _crc16(canonical.encode("ascii"))
+    return f"{canonical},{crc:04X}"
+
+
+def _config_checksum(scope, version, param_id, value_type, value_len, value_bytes) -> int:
+    s = (scope + version
+         + (param_id & 0xFF) + ((param_id >> 8) & 0xFF)
+         + value_type + value_len + sum(value_bytes))
+    return s & 0xFFFF
+
+
+def _build_config_payload(scope: int, param_id: int, value: int) -> bytes:
+    value_bytes = struct.pack("<I", value)
+    checksum = _config_checksum(scope, CONFIG_VERSION, param_id,
+                                VALUE_TYPE_UINT32, len(value_bytes), value_bytes)
+    hdr = struct.pack("<BBHBBH", scope, CONFIG_VERSION, param_id,
+                      VALUE_TYPE_UINT32, len(value_bytes), checksum)
+    return hdr + value_bytes
+
+
+def _lora_send(frame: str) -> None:
+    with _serial_write_lock:
+        _ser.write((frame + "\n").encode("ascii"))
+        _ser.flush()
+
+# ---------------------------------------------------------------------------
+# HTTP uplink server
+# ---------------------------------------------------------------------------
+
+class UplinkHandler(BaseHTTPRequestHandler):
+
+    def do_OPTIONS(self):
+        self.send_response(HTTPStatus.NO_CONTENT)
+        self._cors()
+        self.end_headers()
+
+    def do_GET(self):
+        if self.path == "/health":
+            self._json({"ok": True, "service": "lora-bridge", "transport": "lora"})
+        elif self.path == "/api/uplink/meta":
+            self._json({
+                "scopes": {
+                    "cfs_core": sorted(CFS_CORE_PARAMS),
+                    "mavlink_bridge": sorted(MAVLINK_BRIDGE_PARAMS),
+                },
+                "transport": "lora",
+            })
+        else:
+            self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+
+    def do_POST(self):
+        body = self._read_body()
+        if body is None:
+            return
+        if self.path == "/api/uplink/config":
+            self._handle_config(body)
+        elif self.path == "/api/uplink/recovery":
+            self._handle_recovery(body)
+        else:
+            self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
+
+    def _handle_config(self, body: dict):
+        scope_name = body.get("scope", "")
+        param      = body.get("param", "")
+        raw_value  = body.get("value")
+
+        if scope_name == "cfs_core":
+            scope, params = SCOPE_CFS_CORE_APP, CFS_CORE_PARAMS
+        elif scope_name == "mavlink_bridge":
+            scope, params = SCOPE_MAVLINK_BRIDGE, MAVLINK_BRIDGE_PARAMS
+        else:
+            self._json({"error": f"unknown scope '{scope_name}'"}, HTTPStatus.BAD_REQUEST)
+            return
+
+        if param not in params:
+            self._json({"error": f"unknown param '{param}'",
+                        "available": sorted(params)}, HTTPStatus.BAD_REQUEST)
+            return
+
+        try:
+            value = int(raw_value)
+        except (TypeError, ValueError):
+            self._json({"error": "value must be integer"}, HTTPStatus.BAD_REQUEST)
+            return
+
+        if not (0 <= value <= 0xFFFFFFFF):
+            self._json({"error": "value must be uint32"}, HTTPStatus.BAD_REQUEST)
+            return
+
+        seq = _seq_counter.next()
+        try:
+            payload = _build_config_payload(scope, params[param], value)
+            frame   = _build_lora_frame(seq, payload, UPLINK_CLASS_CONFIG)
+            _lora_send(frame)
+        except Exception as e:
+            self._json({"error": str(e)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+
+        print(f"[UP] CONFIG seq={seq} {scope_name}.{param}={value}  frame={frame}")
+        self._json({"ok": True, "seq": seq, "scope": scope_name,
+                    "param": param, "value": value, "transport": "lora"})
+
+    def _handle_recovery(self, body: dict):
+        payload_hex = body.get("payload_hex", "")
+        if payload_hex:
+            try:
+                payload = bytes.fromhex(payload_hex)
+            except ValueError:
+                self._json({"error": "invalid payload_hex"}, HTTPStatus.BAD_REQUEST)
+                return
+        else:
+            payload = b""
+
+        seq = _seq_counter.next()
+        try:
+            frame = _build_lora_frame(seq, payload, UPLINK_CLASS_RECOVERY)
+            _lora_send(frame)
+        except Exception as e:
+            self._json({"error": str(e)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+
+        print(f"[UP] RECOVERY seq={seq}  frame={frame}")
+        self._json({"ok": True, "seq": seq, "transport": "lora"})
+
+    def _read_body(self) -> dict | None:
+        length = int(self.headers.get("Content-Length", 0))
+        try:
+            return json.loads(self.rfile.read(length))
+        except (json.JSONDecodeError, ValueError):
+            self._json({"error": "invalid JSON"}, HTTPStatus.BAD_REQUEST)
+            return None
+
+    def _cors(self):
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+
+    def _json(self, payload: dict, status: HTTPStatus = HTTPStatus.OK):
+        encoded = json.dumps(payload, indent=2).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(encoded)))
+        self._cors()
+        self.end_headers()
+        self.wfile.write(encoded)
+
+    def log_message(self, *_):
+        pass
+
+# ---------------------------------------------------------------------------
+# Downlink parser
+# ---------------------------------------------------------------------------
+
+def parse_int(v):
+    try: return int(v)
+    except: return None
+
+def parse_float(v):
+    try: return float(v)
+    except: return None
+
+
+def _update_link(seq: int):
+    global _heartbeat, _last_seq, _total_expected, _total_received, _packet_loss
+    _heartbeat += 1
+    if _last_seq is not None:
+        gap = (seq - _last_seq) & 0xFFFFFF
+        if 1 <= gap <= 1000:
+            _total_expected += gap
+            _total_received += 1
+    else:
+        _total_expected += 1
+        _total_received += 1
+    _last_seq = seq
+    _packet_loss = round(
+        (_total_expected - _total_received) / _total_expected * 100.0, 1
+    ) if _total_expected > 0 else 0.0
+
+
+def parse_lora_line(line: str):
     line = line.strip()
-
     parts = line.split(",")
     if not parts:
         return None
 
-    timestamp = int(time.time() * 1000)
+    ts     = int(time.time() * 1000)
     source = parts[0]
 
-    # FC + seq + boot_ms + roll,pitch,yaw,x,y,z,vx,vy,vz
-    # Optional trailing fields: lat,lon,alt,sats,fix,flags
-    if source == "FC" and len(parts) >= 12:
-        data = {
-            "timestamp": timestamp,
-            "source": source,
-            "seq": parse_int(parts[1]),
-            "boot_ms": parse_int(parts[2]),
-            "roll": parse_float(parts[3]),
-            "pitch": parse_float(parts[4]),
-            "yaw": parse_float(parts[5]),
-            "x": parse_float(parts[6]),
-            "y": parse_float(parts[7]),
-            "z": parse_float(parts[8]),
-            "vx": parse_float(parts[9]),
-            "vy": parse_float(parts[10]),
-            "vz": parse_float(parts[11]),
-        }
+    if source == "FC" and len(parts) >= 16:
+        seq     = parse_int(parts[1])
+        boot_ms = parse_int(parts[2])
+        roll    = parse_float(parts[3])
+        pitch   = parse_float(parts[4])
+        yaw     = parse_float(parts[5])
+        x       = parse_float(parts[6])
+        y       = parse_float(parts[7])
+        z       = parse_float(parts[8])
+        vx      = parse_float(parts[9])
+        vy      = parse_float(parts[10])
+        vz      = parse_float(parts[11])
+        lat_e7  = parse_int(parts[12])
+        lon_e7  = parse_int(parts[13])
+        alt_mm  = parse_int(parts[14])
+        fix     = parse_int(parts[15])
 
-        optional_fields = [
-            ("lat", parse_float),
-            ("lon", parse_float),
-            ("alt", parse_float),
-            ("sats", parse_int),
-            ("fix", parse_int),
-            ("flags", parse_int)
-        ]
-
-        for index, (key, parser) in enumerate(optional_fields, start=12):
-            if len(parts) > index:
-                data[key] = parser(parts[index])
-
-        if any(value is None for value in data.values()):
+        if any(v is None for v in [seq, boot_ms, roll, pitch, yaw, x, y, z, vx, vy, vz]):
             return None
 
+        _update_link(seq)
+        data = {
+            "timestamp": ts, "source": "FC",
+            "seq": seq, "boot_ms": boot_ms,
+            "roll": roll, "pitch": pitch, "yaw": yaw,
+            "x": x, "y": y, "z": z,
+            "vx": vx, "vy": vy, "vz": vz,
+            "heartbeat": _heartbeat, "packet_loss": _packet_loss,
+        }
+        if lat_e7 is not None: data["lat"] = lat_e7 / 1e7
+        if lon_e7 is not None: data["lon"] = lon_e7 / 1e7
+        if alt_mm is not None: data["alt"] = alt_mm / 1000.0
+        if fix    is not None: data["fix"] = fix
         return data
 
-    # GPS + seq + boot_ms + lat,lon,alt,sats[,fix]
-    if source == "GPS" and len(parts) >= 7:
-        data = {
-            "timestamp": timestamp,
-            "source": source,
-            "seq": parse_int(parts[1]),
-            "boot_ms": parse_int(parts[2]),
-            "lat": parse_float(parts[3]),
-            "lon": parse_float(parts[4]),
-            "alt": parse_float(parts[5]),
-            "sats": parse_int(parts[6])
-        }
+    if source == "SH" and len(parts) >= 5:
+        seq          = parse_int(parts[1])
+        boot_ms      = parse_int(parts[2])
+        health_state = parse_int(parts[3])
+        fault_code   = parse_int(parts[4])
 
-        if len(parts) > 7:
-            data["fix"] = parse_int(parts[7])
-
-        if any(value is None for value in data.values()):
+        if any(v is None for v in [seq, boot_ms, health_state, fault_code]):
             return None
 
-        return data
-
-    # EKF + seq + boot_ms + flags
-    if source == "EKF" and len(parts) >= 4:
-        data = {
-            "timestamp": timestamp,
-            "source": source,
-            "seq": parse_int(parts[1]),
-            "boot_ms": parse_int(parts[2]),
-            "flags": parse_int(parts[3])
+        _update_link(seq)
+        return {
+            "timestamp": ts, "source": "SH",
+            "seq": seq, "boot_ms": boot_ms,
+            "health_state": health_state, "fault_code": fault_code,
+            "heartbeat": _heartbeat, "packet_loss": _packet_loss,
         }
-
-        if any(value is None for value in data.values()):
-            return None
-
-        return data
 
     return None
 
+# ---------------------------------------------------------------------------
+# WebSocket + serial async loop
+# ---------------------------------------------------------------------------
 
 async def ws_handler(websocket):
     clients.add(websocket)
     print("[WS] client connected")
-
     try:
         await websocket.wait_closed()
     finally:
@@ -126,68 +355,61 @@ async def ws_handler(websocket):
 
 async def broadcast(msg: str):
     if not clients:
-        print("[WS] no clients, skipping broadcast")
         return
-
-    # 핵심: set을 직접 순회하지 않고 복사본을 순회
-    current_clients = list(clients)
-    dead_clients = []
-    print(f"[WS] broadcasting to {len(current_clients)} client(s)")
-
-    for client in current_clients:
+    dead = []
+    for c in list(clients):
         try:
-            await client.send(msg)
-            print("[WS] sent message")
+            await c.send(msg)
         except Exception:
-            print("[WS] send failed, marking client dead")
-            dead_clients.append(client)
-
-    for client in dead_clients:
-        clients.discard(client)
+            dead.append(c)
+    for c in dead:
+        clients.discard(c)
 
 
 async def serial_reader():
-    print(f"[SERIAL] opening {SERIAL_PORT} @ {BAUD}")
-    ser = serial.Serial(SERIAL_PORT, BAUD, timeout=1)
-
     while True:
-        raw = await asyncio.to_thread(ser.readline)
-
+        raw = await asyncio.to_thread(_ser.readline)
         if not raw:
             await asyncio.sleep(0.01)
             continue
-
         line = raw.decode(errors="ignore").strip()
-        data = parse_fc_line(line)
-
+        data = parse_lora_line(line)
         if data is None:
             print("[BAD]", line)
             continue
-
         msg = json.dumps(data)
         print("[OK]", msg)
-        print(f"[WS] broadcast attempt, clients={len(clients)}")
-
         await broadcast(msg)
-        print("[WS] broadcast complete")
 
 
-async def main():
-    server = await websockets.serve(
-        ws_handler,
-        WS_HOST,
-        WS_PORT,
-        ping_interval=None
-    )
+async def main_async(serial_port: str, baudrate: int, http_port: int):
+    global _ser
+    print(f"[SERIAL] opening {serial_port} @ {baudrate}")
+    _ser = serial.Serial(serial_port, baudrate, timeout=1)
 
-    print(f"[WS] ws://{WS_HOST}:{WS_PORT}")
+    # HTTP server in daemon thread
+    http_server = ThreadingHTTPServer(("127.0.0.1", http_port), UplinkHandler)
+    t = threading.Thread(target=http_server.serve_forever, daemon=True)
+    t.start()
+    print(f"[HTTP]  http://127.0.0.1:{http_port}  (uplink)")
+
+    # WebSocket server
+    ws_server = await websockets.serve(ws_handler, WS_HOST, WS_PORT, ping_interval=None)
+    print(f"[WS]    ws://{WS_HOST}:{WS_PORT}  (telemetry)")
 
     try:
         await serial_reader()
     finally:
-        server.close()
-        await server.wait_closed()
+        ws_server.close()
+        await ws_server.wait_closed()
+        http_server.shutdown()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    p = argparse.ArgumentParser(description="LoRa bridge: downlink WS + uplink HTTP on one serial port")
+    p.add_argument("--port",      default="COM7",  help="serial port (default: COM7)")
+    p.add_argument("--baud",      type=int, default=57600, help="baud rate (default: 57600)")
+    p.add_argument("--http-port", type=int, default=8082,  help="uplink HTTP port (default: 8082)")
+    args = p.parse_args()
+
+    asyncio.run(main_async(args.port, args.baud, args.http_port))

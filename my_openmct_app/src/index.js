@@ -1,6 +1,7 @@
 import openmct from 'openmct';
 import '../node_modules/openmct/dist/darkmatterTheme.css';
 import cfsRealtimePlugin from './plugins/cfsRealtime/plugin';
+import uplinkCLIPlugin from './plugins/uplinkCLI/plugin';
 
 const THIRTY_SECONDS = 30 * 1000;
 const FIVE_MINUTES = 5 * 60 * 1000;
@@ -35,6 +36,11 @@ openmct.install(
 );
 openmct.install(openmct.plugins.Clock({ enableClockIndicator: true }));
 
+openmct.install(openmct.plugins.DisplayLayout());
+openmct.install(openmct.plugins.LADTable());
+openmct.install(openmct.plugins.Timeline());
+
+openmct.install(uplinkCLIPlugin());
 openmct.install(cfsRealtimePlugin());
 
 openmct.on('start', () => {

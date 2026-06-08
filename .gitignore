@@ -1,0 +1,5 @@
+my_openmct_app/node_modules/
+my_openmct_app/dist/
+__pycache__/
+*.pyc
+.env

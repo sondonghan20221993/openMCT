@@ -73,6 +73,12 @@ export default function cfsRealtimePlugin() {
             'position-folder': FOLDERS.position,
             'gps-folder': FOLDERS.gps,
             'status-folder': FOLDERS.status,
+            'uplink-cli': {
+                identifier: { namespace: 'cfs', key: 'uplink-cli' },
+                name: 'Uplink CLI',
+                type: 'uplink.terminal',
+                location: 'cfs:root'
+            },
 
             roll: makeTelemetryPoint('roll', 'Roll', 'cfs:attitude-folder', 'float', 'rad'),
             pitch: makeTelemetryPoint('pitch', 'Pitch', 'cfs:attitude-folder', 'float', 'rad'),
@@ -94,7 +100,12 @@ export default function cfsRealtimePlugin() {
 
             seq: makeTelemetryPoint('seq', 'Sequence', 'cfs:status-folder', 'integer', ''),
             boot_ms: makeTelemetryPoint('boot_ms', 'Boot Time', 'cfs:status-folder', 'integer', 'ms'),
-            flags: makeTelemetryPoint('flags', 'EKF Flags', 'cfs:status-folder', 'integer', '')
+            flags: makeTelemetryPoint('flags', 'EKF Flags', 'cfs:status-folder', 'integer', ''),
+
+            packet_loss: makeTelemetryPoint('packet_loss', 'Packet Loss', 'cfs:status-folder', 'float', '%'),
+            heartbeat: makeTelemetryPoint('heartbeat', 'Heartbeat', 'cfs:status-folder', 'integer', ''),
+            health_state: makeTelemetryPoint('health_state', 'Health State', 'cfs:status-folder', 'integer', ''),
+            fault_code: makeTelemetryPoint('fault_code', 'Fault Code', 'cfs:status-folder', 'integer', '')
         };
 
         const COMPOSITION = {
@@ -102,7 +113,8 @@ export default function cfsRealtimePlugin() {
                 FOLDERS.attitude.identifier,
                 FOLDERS.position.identifier,
                 FOLDERS.gps.identifier,
-                FOLDERS.status.identifier
+                FOLDERS.status.identifier,
+                { namespace: 'cfs', key: 'uplink-cli' }
             ],
             'attitude-folder': [
                 OBJECTS.roll.identifier,
@@ -127,7 +139,11 @@ export default function cfsRealtimePlugin() {
             'status-folder': [
                 OBJECTS.seq.identifier,
                 OBJECTS.boot_ms.identifier,
-                OBJECTS.flags.identifier
+                OBJECTS.flags.identifier,
+                OBJECTS.packet_loss.identifier,
+                OBJECTS.heartbeat.identifier,
+                OBJECTS.health_state.identifier,
+                OBJECTS.fault_code.identifier
             ]
         };
 
