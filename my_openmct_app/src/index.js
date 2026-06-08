@@ -1,6 +1,7 @@
 import openmct from 'openmct';
 import '../node_modules/openmct/dist/darkmatterTheme.css';
 import cfsRealtimePlugin from './plugins/cfsRealtime/plugin';
+import uplinkTerminalPlugin from './plugins/uplinkTerminal/plugin';
 
 const THIRTY_SECONDS = 30 * 1000;
 const FIVE_MINUTES = 5 * 60 * 1000;
@@ -36,6 +37,7 @@ openmct.install(
 openmct.install(openmct.plugins.Clock({ enableClockIndicator: true }));
 
 openmct.install(cfsRealtimePlugin());
+openmct.install(uplinkTerminalPlugin());
 
 openmct.on('start', () => {
     openmct.time.setTimeSystem('utc');
