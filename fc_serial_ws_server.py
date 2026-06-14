@@ -285,55 +285,60 @@ def parse_lora_line(line: str):
     ts     = int(time.time() * 1000)
     source = parts[0]
 
-    if source == "FC" and len(parts) >= 16:
-        seq     = parse_int(parts[1])
-        boot_ms = parse_int(parts[2])
-        roll    = parse_float(parts[3])
-        pitch   = parse_float(parts[4])
-        yaw     = parse_float(parts[5])
-        x       = parse_float(parts[6])
-        y       = parse_float(parts[7])
-        z       = parse_float(parts[8])
-        vx      = parse_float(parts[9])
-        vy      = parse_float(parts[10])
-        vz      = parse_float(parts[11])
-        lat_e7  = parse_int(parts[12])
-        lon_e7  = parse_int(parts[13])
-        alt_mm  = parse_int(parts[14])
-        fix     = parse_int(parts[15])
+    if source == "FC" and len(parts) >= 17:
+        seq        = parse_int(parts[1])
+        ts_ms      = parse_int(parts[2])
+        roll       = parse_float(parts[3])
+        pitch      = parse_float(parts[4])
+        yaw        = parse_float(parts[5])
+        x          = parse_float(parts[6])
+        y          = parse_float(parts[7])
+        z          = parse_float(parts[8])
+        vx         = parse_float(parts[9])
+        vy         = parse_float(parts[10])
+        vz         = parse_float(parts[11])
+        lat_e7     = parse_int(parts[12])
+        lon_e7     = parse_int(parts[13])
+        alt_mm     = parse_int(parts[14])
+        fix        = parse_int(parts[15])
+        uplink_fb  = parse_int(parts[16])
 
-        if any(v is None for v in [seq, boot_ms, roll, pitch, yaw, x, y, z, vx, vy, vz]):
+        if any(v is None for v in [seq, ts_ms, roll, pitch, yaw, x, y, z, vx, vy, vz]):
             return None
 
         _update_link(seq)
         data = {
             "timestamp": ts, "source": "FC",
-            "seq": seq, "boot_ms": boot_ms,
+            "seq": seq, "boot_ms": ts_ms,
             "roll": roll, "pitch": pitch, "yaw": yaw,
             "x": x, "y": y, "z": z,
             "vx": vx, "vy": vy, "vz": vz,
             "heartbeat": _heartbeat, "packet_loss": _packet_loss,
         }
-        if lat_e7 is not None: data["lat"] = lat_e7 / 1e7
-        if lon_e7 is not None: data["lon"] = lon_e7 / 1e7
-        if alt_mm is not None: data["alt"] = alt_mm / 1000.0
-        if fix    is not None: data["fix"] = fix
+        if lat_e7    is not None: data["lat"]       = lat_e7 / 1e7
+        if lon_e7    is not None: data["lon"]       = lon_e7 / 1e7
+        if alt_mm    is not None: data["alt"]       = alt_mm / 1000.0
+        if fix       is not None: data["fix"]       = fix
+        if uplink_fb is not None: data["uplink_fb"] = uplink_fb
         return data
 
-    if source == "SH" and len(parts) >= 5:
+    if source == "SH" and len(parts) >= 7:
         seq          = parse_int(parts[1])
-        boot_ms      = parse_int(parts[2])
+        ts_ms        = parse_int(parts[2])
         health_state = parse_int(parts[3])
         fault_code   = parse_int(parts[4])
+        link_state   = parse_int(parts[5])
+        uplink_fb    = parse_int(parts[6])
 
-        if any(v is None for v in [seq, boot_ms, health_state, fault_code]):
+        if any(v is None for v in [seq, ts_ms, health_state, fault_code]):
             return None
 
         _update_link(seq)
         return {
             "timestamp": ts, "source": "SH",
-            "seq": seq, "boot_ms": boot_ms,
+            "seq": seq, "boot_ms": ts_ms,
             "health_state": health_state, "fault_code": fault_code,
+            "link_state": link_state, "uplink_fb": uplink_fb,
             "heartbeat": _heartbeat, "packet_loss": _packet_loss,
         }
 
