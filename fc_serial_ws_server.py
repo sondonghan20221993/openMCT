@@ -122,6 +122,41 @@ def _lora_send(frame: str) -> None:
         _ser.write((frame + "\n").encode("ascii"))
         _ser.flush()
 
+
+# ---------------------------------------------------------------------------
+# TDM slot-aligned uplink
+# ---------------------------------------------------------------------------
+# 드론(lora_fc_downlink_app)은 반이중 TDM이라 downlink TX 직후 300ms만 RX 윈도우를 연다.
+# 따라서 UP 프레임을 아무 때나 쏘면 윈도우를 놓쳐 버려진다(충돌/유실).
+# 해결: HTTP 핸들러는 프레임을 큐에 적재만 하고, serial_reader가 downlink 라인을
+# 수신한 직후(= Pi RX 윈도우가 막 열린 슬롯)에 큐를 flush 해서 전송한다.
+# SH 패킷이 FC 없이도 ~1Hz로 downlink되므로 슬롯은 항상 열린다(uplink 지연 최대 ~1초).
+#
+# 단발 전송은 한 슬롯만 노려 타이밍 지터/RF 손실로 자주 빗나간다(실측: 1번=무응답,
+# 여러 번 붙여넣으면 적중). → 동일 프레임을 연속 _UPLINK_RETX개 슬롯에 자동 재전송한다.
+# uplink_app은 sequence(IsSequenceAccepted)로 중복을 무시하므로 1발만 적용되고 나머지는
+# replay로 거부(무해)된다. 즉 한 번의 명령으로도 안정적으로 도달한다.
+_UPLINK_RETX = 4
+_pending_lock = threading.Lock()
+_pending_uplink: list = []   # [[frame, remaining_retx], ...]
+
+
+def _queue_uplink(frame: str) -> None:
+    with _pending_lock:
+        _pending_uplink.append([frame, _UPLINK_RETX])
+
+
+def _flush_pending_uplink() -> None:
+    with _pending_lock:
+        if not _pending_uplink:
+            return
+        for item in _pending_uplink:
+            _lora_send(item[0])
+            n = _UPLINK_RETX - item[1] + 1
+            print(f"[UP->slot] ({n}/{_UPLINK_RETX}) {item[0]}")
+            item[1] -= 1
+        _pending_uplink[:] = [it for it in _pending_uplink if it[1] > 0]
+
 # ---------------------------------------------------------------------------
 # HTTP uplink server
 # ---------------------------------------------------------------------------
@@ -190,14 +225,14 @@ class UplinkHandler(BaseHTTPRequestHandler):
         try:
             payload = _build_config_payload(scope, params[param], value)
             frame   = _build_lora_frame(seq, payload, UPLINK_CLASS_CONFIG)
-            _lora_send(frame)
+            _queue_uplink(frame)
         except Exception as e:
             self._json({"error": str(e)}, HTTPStatus.INTERNAL_SERVER_ERROR)
             return
 
-        print(f"[UP] CONFIG seq={seq} {scope_name}.{param}={value}  frame={frame}")
-        self._json({"ok": True, "seq": seq, "scope": scope_name,
-                    "param": param, "value": value, "transport": "lora"})
+        print(f"[UP] CONFIG seq={seq} {scope_name}.{param}={value}  queued  frame={frame}")
+        self._json({"ok": True, "seq": seq, "scope": scope_name, "param": param,
+                    "value": value, "transport": "lora", "queued": True})
 
     def _handle_recovery(self, body: dict):
         payload_hex = body.get("payload_hex", "")
@@ -213,13 +248,13 @@ class UplinkHandler(BaseHTTPRequestHandler):
         seq = _seq_counter.next()
         try:
             frame = _build_lora_frame(seq, payload, UPLINK_CLASS_RECOVERY)
-            _lora_send(frame)
+            _queue_uplink(frame)
         except Exception as e:
             self._json({"error": str(e)}, HTTPStatus.INTERNAL_SERVER_ERROR)
             return
 
-        print(f"[UP] RECOVERY seq={seq}  frame={frame}")
-        self._json({"ok": True, "seq": seq, "transport": "lora"})
+        print(f"[UP] RECOVERY seq={seq}  queued  frame={frame}")
+        self._json({"ok": True, "seq": seq, "transport": "lora", "queued": True})
 
     def _read_body(self) -> dict | None:
         length = int(self.headers.get("Content-Length", 0))
@@ -378,6 +413,9 @@ async def serial_reader():
             await asyncio.sleep(0.01)
             continue
         line = raw.decode(errors="ignore").strip()
+        # downlink 라인 수신 = Pi가 방금 TX함 = RX 윈도우(300ms)가 지금 열림.
+        # 대기 중인 uplink 프레임을 이 슬롯에 즉시 전송(TDM 정렬).
+        _flush_pending_uplink()
         data = parse_lora_line(line)
         if data is None:
             print("[BAD]", line)

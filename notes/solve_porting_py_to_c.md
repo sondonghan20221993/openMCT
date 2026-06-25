@@ -196,15 +196,17 @@ else                                           // ==0 or 1 → FC 패킷
 6. EKF_STATUS가 한 번도 파이프에 못 들어감 → PacketType 1(FC)로 복귀 불가
 7. **결과: SH 패킷만 전송, FC 패킷 전혀 전송 안 됨**
 
-### 수정 내용
+> **경쟁 조건(Race Condition)**: 파이프에 어떤 메시지가 살아남느냐가 타이밍에 따라 매번 달라짐. 같은 코드인데 실행할 때마다 결과가 다른 것 = 경쟁 조건.
 
-**수정 1: 파이프 깊이 10 → 200** (`lora_tdm_app.c`, Init)
+### lora_tdm_app 수정 내용 (적용 완료)
+
+**수정 1: 파이프 깊이 10 → 50** (`lora_tdm_app.c`, Init)
 ```c
-// Before:
-Status = CFE_SB_CreatePipe(&LORA_TDM_APP_Data.CommandPipe, 10, "LORA_TDM_PIPE");
-// After:
-Status = CFE_SB_CreatePipe(&LORA_TDM_APP_Data.CommandPipe, 200, "LORA_TDM_PIPE");
+Status = CFE_SB_CreatePipe(&LORA_TDM_APP_Data.CommandPipe, 50, "LORA_TDM_PIPE");
 ```
+> `CFE_PLATFORM_SB_MAX_PIPE_DEPTH = 50`은 이 프로젝트 설정값 (변경 가능).
+> 단, 50도 ATTITUDE 50Hz + 1초 주기 기준 꽉 참 → 근본 해결은 아님.
+> 200 시도 시 `CreatePipeErr: Bad Input Arg` 로 앱 즉시 종료됨 (확인됨).
 
 **수정 2: PacketType 메시지 의존 방식 → DownlinkSeq 기반 결정적 교번** (`lora_tdm_app.c`, RunTx)
 ```c
@@ -214,32 +216,198 @@ Type = ((LORA_TDM_APP_Data.DownlinkSeq % 2U) == 0U)
            : LORA_TDM_APP_SYSTEM_HEALTH_PACKET_TYPE;
 ```
 - EKF_STATUS 미수신 상태에서도 FC/SH 1:1 교번 보장
-- SYSTEM_HEALTH 타이밍 경쟁 조건 제거
+- 경쟁 조건 제거
 
 ---
 
-## 8. 다음 조사 단계 (우선순위 순)
+## 8. 앱 리네임 및 현재 빌드 구조 (2026-05-25~)
 
-1. **PacketType 고착 확인**: cFS 로그에서 FC 패킷 전송 여부 확인
-   - `lora_tdm_app`에 TX 로그 추가 또는 COM7에서 직접 모니터링
-   
-2. **EKF_STATUS_REPORT 수신 확인**: `mavlink_bridge_app` 로그에서 EKF 메시지 수신 여부 확인
+`lora_tdm_app` → `lora_fc_downlink_app`으로 리네임됨.
 
-3. **PacketType 로직 개선**: EKF_STATUS에만 FC 전환 의존 제거
-   - ATTITUDE/LOCAL 수신 시에도 `PacketType = FC_STATE`로 설정하거나
-   - TDM 카운터 기반 교번 방식으로 변경
+| 항목 | 내용 |
+|------|------|
+| `targets.cmake` | `lora_fc_downlink_app` 참조 |
+| `startup.scr` | `lora_fc_downlink_app` 로드 |
+| 소스 위치 | `~/cFS_clean/apps/lora_fc_downlink_app/` |
+| 이전 소스 | `~/cfs-telemetry-app/lora_tdm_app/` (빌드에서 제외) |
 
-4. **`mavlink_bridge_app_utils.c` C 파싱 검증**: 바이트 오프셋 확인
+### lora_fc_downlink_app 아키텍처 차이
+
+| | lora_tdm_app | lora_fc_downlink_app |
+|--|--|--|
+| 처리 방식 | Poll (1초 주기 RunCycle) | 이벤트 기반 (PEND_FOREVER) |
+| LoRa 쓰기 | 1초마다 1회 | 메시지 수신마다 즉시 |
+| 파이프 오버플로우 | 발생 | 거의 없음 (즉시 소비) |
 
 ---
 
-## 8. 관련 파일 경로
+## 9. lora_fc_downlink_app 추가 버그 및 수정 (2026-06-14) ✅
+
+### 발견된 버그
+
+Python 브리지(`fc_serial_ws_server.py`)가 기대하는 형식과 불일치:
+
+| 패킷 | lora_fc_downlink_app 출력 | Python 브리지 필요 | 결과 |
+|------|--------------------------|-------------------|------|
+| FC | 15 fields | 17 fields (`uplink_fb` 누락) | `[BAD]` → 드롭 |
+| SH | 5 fields | 7 fields (`link_state`, `uplink_fb` 누락) | `[BAD]` → 드롭 |
+| TX 속도 | 50Hz (ATTITUDE마다 쓰기) | 제한 없음 | LoRa 버퍼 오버플로 |
+
+### 수정 내용 (`lora_fc_downlink_app_utils.c`, `lora_fc_downlink_app.h`)
+
+```c
+// SH: ,0,0 추가 (link_state=0, uplink_fb=0)
+"SH,%lu,%lu,%u,%u,0,0\n"
+
+// FC: ,0 추가 (uplink_fb=0)
+"FC,%lu,%lu,%.6f,...,%u,0\n"
+
+// 레이트 리미터: 500ms 미만이면 쓰기 스킵
+if ((NowMs - LORA_FC_DOWNLINK_APP_Data.LastLoRaTxMs) < 500U) return;
+LORA_FC_DOWNLINK_APP_Data.LastLoRaTxMs = NowMs; // 쓰기 성공 시 갱신
+```
+
+`lora_fc_downlink_app.h`에 `uint32 LastLoRaTxMs` 필드 추가.
+
+### 수정 후 예상 동작
+
+ATTITUDE 50Hz 도착 → 500ms마다 1회만 FC 쓰기 (2Hz).
+SYSTEM_HEALTH 1Hz 도착 → 500ms 경과 시 SH 쓰기.
+결과: FC(0ms) → FC(500ms) → SH(1000ms) → FC(1500ms) ... 교번 패턴.
+
+---
+
+## 10. 패킷 포맷 불일치 (openmct_bridge_notes.md vs 실제 코드)
+
+`openmct_bridge_notes.md`에 문서화된 포맷과 `fc_serial_ws_server.py`가 실제로 파싱하는 포맷이 다름.
+
+| | 문서 (bridge_notes) | 파서 코드 (fc_serial_ws_server.py) |
+|--|--|--|
+| FC fields | 16개 (uplink_fb 없음) | 17개 필요 (`len(parts) >= 17`) |
+| SH fields | 5개 (link_state, uplink_fb 없음) | 7개 필요 (`len(parts) >= 7`) |
+
+**이유**: `lora_tdm_app`은 `uplink_fb`, `link_state` 필드를 전송했었음. `lora_fc_downlink_app`으로 리네임되면서 이 필드들이 누락됨. 문서는 업데이트됐지만 파서 코드는 구버전 포맷 기준으로 남아 있음.
+
+**수정 방향**: `lora_fc_downlink_app`이 `,0` / `,0,0` 추가 (실제 값 없으므로 0 하드코딩) → 파서 코드 변경 없이 호환.
+
+---
+
+## 11. 설계 원칙 vs 현재 구현 불일치 (cFS설명.pdf 기준)
+
+PDF(`cFS설명.pdf`)에 명시된 원래 설계 의도:
+
+> **lora_tdm_app**: "LoRa 시리얼 **독점 소유**. 1Hz TDM: TX → RX 300ms 윈도우. 수신 프레임 CRC16 검증 후 **UPLINK_APP_CMD_MID로 SB 전달**"
+>
+> **uplink_app**: "명령 수신: **lora_tdm_app으로부터** 지상국이 보낸 명령을 받습니다"
+
+즉 `uplink_app`은 시리얼 포트를 열지 않고 **SB 메시지만 수신**하는 것이 설계 의도.
+
+```
+설계 의도 (PDF):
+지상국 → LoRa RF → Pi CP2102
+                        ↓
+              lora_tdm_app (포트 독점)
+              TX 후 RX 300ms 윈도우
+              CRC16 검증
+                        ↓ SB publish (UPLINK_APP_CMD_MID)
+              uplink_app (시리얼 포트 미접촉)
+              시퀀스 검증 → 헬스 게이트 → cfs_core_app
+```
+
+---
+
+## 12. LoRa 시리얼 포트 충돌 (소프트웨어 — 설계 원칙 위반)
+
+`lora_tdm_app` → `lora_fc_downlink_app` 재설계 과정에서 핵심 원칙 3개가 사라짐:
+
+| 원칙 | lora_tdm_app (PDF 설계) | lora_fc_downlink_app (현재 코드) |
+|------|------------------------|--------------------------------|
+| 시리얼 포트 독점 | ✅ lora_tdm_app만 소유 | ❌ uplink_app도 직접 열음 |
+| uplink 전달 방식 | ✅ SB publish → uplink_app | ❌ uplink_app이 시리얼 직접 읽음 |
+| TDM RX 윈도우 | ✅ TX 후 300ms 명시적 대기 | ❌ 없음 (이벤트 기반 TX만) |
+
+**결과**: `uplink_app`과 `lora_fc_downlink_app`이 동일 포트(CP2102)를 별도 fd로 동시에 열고 있음.
+
+```
+uplink_app:            open(CP2102, O_RDONLY)
+lora_fc_downlink_app:  open(CP2102, O_RDWR)
+```
+
+Linux에서 같은 시리얼 포트를 두 프로세스가 열면 **먼저 read()한 쪽이 바이트를 가져감** → 나머지는 영구 손실.
+
+```
+Pi CP2102 수신 버퍼: [U][P][,][1]...
+                              ↓
+              ┌───────────────┴───────────────┐
+         uplink_app                  lora_fc_downlink_app
+         (read 루프)                  (ServiceLoRaRead)
+              │                               │
+         UP 바이트 일부 가져감          HB 바이트 일부 가져감
+         → UP 프레임 파싱 실패          → ACK 미수신
+```
+
+**올바른 수정 방향**:
+```
+lora_fc_downlink_app  ← 포트 독점 (TX + RX 300ms 윈도우)
+                              │ UP 프레임 수신 시 CRC16 검증 후
+                         SB publish (UPLINK_APP_CMD_MID)
+                              │
+                         uplink_app ← 시리얼 포트 닫고 SB 구독만
+```
+
+---
+
+## 13. LoRa RF 충돌 (하드웨어 / 반이중 문제)
+
+`openmct_bridge_notes.md`에서 이미 파악된 문제.
+
+**원인**: LoRa는 반이중(half-duplex). Pi가 FC/SH 다운링크를 보내는 동안 Windows에서 UP 업링크를 보내면 **동일 RF 채널에서 충돌** → 프레임 깨짐.
+
+```
+EVS: UPLINK_APP: LoRa frame parse failed: UP1,1,10,...
+```
+
+PDF 설계의 TDM이 이 문제를 해결하는 방식:
+```
+Pi TX (FC/SH 전송)
+       ↓
+RX 윈도우 300ms 오픈  ← 이 구간에만 Windows가 전송 가능
+       ↓
+Pi RX (HB or UP 수신)
+       ↓
+다음 TX 사이클
+```
+
+Pi가 TX를 마친 직후 명시적으로 RX 윈도우를 열어야 하며, Windows는 그 윈도우 안에서만 전송해야 함. `lora_fc_downlink_app`은 이 윈도우 메커니즘이 없어서 충돌 방어 불가.
+
+**근본 해결**: LoRa 모듈 2개로 분리 (TX 전용 / RX 전용). Windows 쪽 COM6 후보 논의 중.
+
+---
+
+## 14. 전체 미해결 이슈 목록 (2026-06-14 기준)
+
+| # | 이슈 | 심각도 | 상태 |
+|---|------|--------|------|
+| 1 | `lora_fc_downlink_app` FC/SH 패킷 포맷 불일치 | 🔴 치명 | ✅ 수정 완료 (WSL2 빌드) |
+| 2 | `lora_fc_downlink_app` 50Hz TX → LoRa 과부하 | 🔴 치명 | ✅ 500ms 레이트 리미터 추가 |
+| 3 | `uplink_app`이 직접 시리얼 포트 열기 (설계 원칙 위반) | 🔴 치명 | ❌ 미해결 — `lora_fc_downlink_app`이 포트 독점 후 SB publish로 전달해야 함 |
+| 4 | TDM RX 윈도우 없음 → RF 반이중 충돌 방어 불가 | 🟠 높음 | ❌ 미해결 — TX 후 300ms RX 윈도우 복원 필요 |
+| 5 | LoRa RF 하드웨어 충돌 (Pi TX 중 Windows TX) | 🟠 높음 | ❌ 미해결 (LoRa 모듈 2개 분리 또는 TDM 복원) |
+| 6 | `CFE_PLATFORM_SB_MAX_PIPE_DEPTH=50` 한계 (구버전) | 🟡 중간 | ✅ lora_fc_downlink_app은 PEND_FOREVER로 우회 |
+| 7 | RSSI/SNR 미지원 (LoRa 투명 UART 모드) | 🟢 낮음 | 하드웨어 모드 변경 필요 |
+| 8 | GPS `sats` 필드 미전송 | 🟢 낮음 | 패킷 포맷 확장 필요 |
+
+---
+
+## 15. 관련 파일 경로
 
 | 파일 | 용도 |
 |------|------|
+| `~/cFS_clean/apps/lora_fc_downlink_app/fsw/src/lora_fc_downlink_app_utils.c` | LoRa TX/RX + 패킷 빌드 (수정됨) |
+| `~/cFS_clean/apps/lora_fc_downlink_app/fsw/src/lora_fc_downlink_app.h` | Data 구조체 (LastLoRaTxMs 추가됨) |
+| `~/cFS_clean/apps/uplink_app/fsw/src/uplink_app_utils.c` | LoRa RX 업링크 파싱 (포트 충돌 대상) |
 | `~/cfs-telemetry-app/mavlink_bridge_app/fsw/src/mavlink_bridge_app_utils.c` | C MAVLink 파싱 로직 |
-| `~/cfs-telemetry-app/mavlink_bridge_app/config/default_mavlink_bridge_app_msgstruct.h` | 발행 구조체 정의 |
-| `~/cfs-telemetry-app/lora_tdm_app/fsw/src/lora_tdm_app_utils.c` | SB 수신 캐스트 + FC 패킷 빌드 |
-| `~/cfs-telemetry-app/lora_tdm_app/fsw/src/lora_tdm_app_dispatch.c` | MID 라우팅 |
-| `/mnt/c/.../openMCT/fc_serial_ws_server.py` | ASCII CSV 파싱 → WebSocket |
+| `~/cfs-telemetry-app/lora_tdm_app/fsw/src/lora_tdm_app.c` | 구버전 TDM 앱 (수정 적용됨, 현재 빌드 제외) |
+| `/mnt/c/.../openMCT/fc_serial_ws_server.py` | 지상국 ASCII 파서 + WS 브로드캐스트 |
+| `/mnt/c/.../openMCT/openmct_bridge_notes.md` | 전체 데이터 흐름 참고 문서 |
 

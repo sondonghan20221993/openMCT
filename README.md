@@ -10,7 +10,8 @@ LoRa 다운링크 수신, WebSocket 스트리밍, 업링크 명령 전송을 단
 | `my_openmct_app/` | Open MCT 웹 UI (Vite 기반) |
 | `fc_serial_ws_server.py` | LoRa 직렬 수신 + WebSocket 다운링크 + HTTP 업링크 (통합) |
 
-> `uplink_command_server.py` — 구버전 분리 서버. `fc_serial_ws_server.py`로 통합되어 사용하지 않습니다.
+> 구버전 분리/중복 서버 `uplink_command_server.py`, `lora_bridge.py`, `openmct_telemetry_server.py`는
+> `fc_serial_ws_server.py`로 통합되어 **제거됨**.
 
 ## 실행 방법
 
@@ -23,7 +24,7 @@ python fc_serial_ws_server.py --port COM7 --baud 57600 --http-port 8082
 ```
 
 - `ws://127.0.0.1:8765` — Open MCT로 텔레메트리 broadcast
-- `http://127.0.0.1:8082` — 업링크 명령 수신
+- `http://127.0.0.1:8082` — 업링크 명령 수신 (**TDM 슬롯 정렬**: 큐 적재 후 downlink 수신 슬롯에 송신)
 
 ### 2. Open MCT UI
 
@@ -121,4 +122,4 @@ clear                                   터미널 초기화
 
 ## 알려진 한계
 
-- **업링크 RF 충돌**: `lora_fc_downlink_app`이 FC/SH를 연속 TX 중일 때 UP 프레임을 전송하면 동일 채널에서 충돌 발생 → Pi 수신 프레임 깨짐. 해결: 별도 COM 포트(COM6)에 업링크 전용 LoRa 모듈 연결.
+- **업링크 RF 충돌 → TDM 슬롯 정렬로 해결**: 아무 때나 UP를 쏘면 드론의 반이중 RX 윈도우(downlink TX 후 300ms)를 놓쳐 충돌/유실됨. `fc_serial_ws_server.py`가 UP 프레임을 큐에 적재 후 downlink 라인 수신 직후 슬롯에 전송하도록 처리(별도 COM 포트 불필요). 상세: `openmct_bridge_notes.md`.
