@@ -24,11 +24,12 @@ const MAVLINK_BRIDGE_PARAMS = [
 const HELP = {
     general: [
         'Commands:',
-        '  config <scope> <param> <value>   Send CONFIG command to uplink_app',
-        '  recovery [payload_hex]           Send RECOVERY command (payload currently ignored by uplink_app)',
-        '  uplinktest                       Check uplink server health and available params',
-        '  help [config|recovery]           Show detailed help',
-        '  clear                            Clear terminal',
+        '  config <scope> <param> <value>      Send CONFIG command to uplink_app',
+        '  route <mission|landing> x,y,z ...   Send ROUTE_UPDATE command to uplink_app',
+        '  recovery [payload_hex]              Send RECOVERY command (payload currently ignored by uplink_app)',
+        '  uplinktest                          Check uplink server health and available params',
+        '  help [config|route|recovery]        Show detailed help',
+        '  clear                               Clear terminal',
         '',
         'Scopes: cfs_core, mavlink_bridge',
     ].join('\n'),
@@ -45,6 +46,20 @@ const HELP = {
         '    ' + MAVLINK_BRIDGE_PARAMS.join(', '),
         '',
         '  Example: config cfs_core publish_period_ms 100',
+    ].join('\n'),
+
+    route: [
+        'route <route_type> x,y,z [x,y,z ...]',
+        '  route_type : mission | landing',
+        '  waypoint   : x,y,z in meters, LOCAL_NED (Z = AGL, positive up)',
+        '  count      : 1 – 16 waypoints',
+        '',
+        '  Validation is performed by uplink_app (spec §18.4.6.2):',
+        '    finite coords, altitude 2–8 m, adjacent 3D distance 2–2 m, flyable area.',
+        '  Out-of-range routes are rejected on the drone and the active route is kept.',
+        '',
+        '  Example: route mission 0,-10,3 2,-10,3',
+        '  Example: route landing 2,-8,4 2,-8,2',
     ].join('\n'),
 
     recovery: [
@@ -129,6 +144,55 @@ export default function uplinkCLIPlugin(serverUrl = DEFAULT_SERVER) {
                             if (json.ok) {
                                 appendLine(
                                     `[OK] CONFIG accepted  seq=${json.seq}  ${json.scope}.${json.param}=${json.value}`,
+                                    'uplink-ok',
+                                );
+                            } else {
+                                const hint = json.available
+                                    ? `  available: ${json.available.join(', ')}`
+                                    : '';
+                                appendLine(`[ERR] ${json.error}${hint}`, 'uplink-err');
+                            }
+                        } catch (e) {
+                            appendLine(`[ERR] server unreachable (${serverUrl}): ${e.message}`, 'uplink-err');
+                        }
+                        return;
+                    }
+
+                    if (cmd === 'route') {
+                        // route <mission|landing> x,y,z [x,y,z ...]
+                        const routeType = parts[1]?.toLowerCase();
+                        const wpTokens = parts.slice(2);
+                        if (!routeType || wpTokens.length === 0) {
+                            appendLine('[ERR] usage: route <mission|landing> x,y,z [x,y,z ...]', 'uplink-err');
+                            return;
+                        }
+                        if (routeType !== 'mission' && routeType !== 'landing') {
+                            appendLine('[ERR] route_type must be mission | landing', 'uplink-err');
+                            return;
+                        }
+                        if (wpTokens.length > 16) {
+                            appendLine('[ERR] too many waypoints (max 16)', 'uplink-err');
+                            return;
+                        }
+                        const waypoints = [];
+                        for (const tok of wpTokens) {
+                            const nums = tok.split(',').map(Number);
+                            if (nums.length !== 3 || nums.some((n) => !Number.isFinite(n))) {
+                                appendLine(`[ERR] bad waypoint '${tok}', expected x,y,z`, 'uplink-err');
+                                return;
+                            }
+                            waypoints.push(nums);
+                        }
+                        try {
+                            const res = await fetch(`${serverUrl}/api/uplink/route`, {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ route_type: routeType, waypoints }),
+                            });
+                            const json = await res.json();
+                            if (json.ok) {
+                                appendLine(
+                                    `[OK] ROUTE sent  seq=${json.seq}  ${json.route_type}  wps=${json.waypoint_count}`,
                                     'uplink-ok',
                                 );
                             } else {

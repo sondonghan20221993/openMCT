@@ -41,11 +41,21 @@ _serial_write_lock = threading.Lock()
 # Uplink protocol (mirrors uplink_command_server.py)
 # ---------------------------------------------------------------------------
 UPLINK_PROTOCOL_VERSION = 1
-UPLINK_CLASS_CONFIG      = 1
-UPLINK_CLASS_RECOVERY    = 4
+UPLINK_CLASS_CONFIG       = 1
+UPLINK_CLASS_ROUTE_UPDATE = 2
+UPLINK_CLASS_RECOVERY     = 4
 
 SCOPE_CFS_CORE_APP   = 1
 SCOPE_MAVLINK_BRIDGE = 2
+
+# route update (spec §18.4.6.2) — 검증은 uplink_app이 권위 수행, 여기선 형식만 점검
+ROUTE_VERSION             = 1
+MAX_ROUTE_WAYPOINTS       = 16
+ROUTE_TYPES = {
+    "mission":           1,   # mission_extension
+    "mission_extension": 1,
+    "landing":           2,
+}
 
 CONFIG_VERSION    = 1
 VALUE_TYPE_UINT32 = 0
@@ -115,6 +125,14 @@ def _build_config_payload(scope: int, param_id: int, value: int) -> bytes:
     hdr = struct.pack("<BBHBBH", scope, CONFIG_VERSION, param_id,
                       VALUE_TYPE_UINT32, len(value_bytes), checksum)
     return hdr + value_bytes
+
+
+def _build_route_payload(route_type: int, route_version: int, waypoints: list) -> bytes:
+    # layout: route_type:u8, route_version:u8, waypoint_count:u8, reserved:u8, then x,y,z f32 LE per wp
+    payload = struct.pack("<BBBB", route_type, route_version, len(waypoints), 0)
+    for x, y, z in waypoints:
+        payload += struct.pack("<fff", x, y, z)
+    return payload
 
 
 def _lora_send(frame: str) -> None:
@@ -188,6 +206,8 @@ class UplinkHandler(BaseHTTPRequestHandler):
             return
         if self.path == "/api/uplink/config":
             self._handle_config(body)
+        elif self.path == "/api/uplink/route":
+            self._handle_route(body)
         elif self.path == "/api/uplink/recovery":
             self._handle_recovery(body)
         else:
@@ -233,6 +253,44 @@ class UplinkHandler(BaseHTTPRequestHandler):
         print(f"[UP] CONFIG seq={seq} {scope_name}.{param}={value}  queued  frame={frame}")
         self._json({"ok": True, "seq": seq, "scope": scope_name, "param": param,
                     "value": value, "transport": "lora", "queued": True})
+
+    def _handle_route(self, body: dict):
+        route_name = str(body.get("route_type", "")).lower()
+        raw_wps    = body.get("waypoints")
+
+        route_type = ROUTE_TYPES.get(route_name)
+        if route_type is None:
+            self._json({"error": f"unknown route_type '{route_name}'",
+                        "available": ["mission", "landing"]}, HTTPStatus.BAD_REQUEST)
+            return
+
+        if not isinstance(raw_wps, list) or not (1 <= len(raw_wps) <= MAX_ROUTE_WAYPOINTS):
+            self._json({"error": f"waypoints must be a list of 1..{MAX_ROUTE_WAYPOINTS} [x,y,z]"},
+                       HTTPStatus.BAD_REQUEST)
+            return
+
+        waypoints = []
+        for i, wp in enumerate(raw_wps):
+            try:
+                x, y, z = (float(v) for v in wp)
+            except (TypeError, ValueError):
+                self._json({"error": f"waypoint[{i}] must be [x,y,z] numbers"},
+                           HTTPStatus.BAD_REQUEST)
+                return
+            waypoints.append((x, y, z))
+
+        seq = _seq_counter.next()
+        try:
+            payload = _build_route_payload(route_type, ROUTE_VERSION, waypoints)
+            frame   = _build_lora_frame(seq, payload, UPLINK_CLASS_ROUTE_UPDATE)
+            _queue_uplink(frame)
+        except Exception as e:
+            self._json({"error": str(e)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+
+        print(f"[UP] ROUTE seq={seq} type={route_name} wps={len(waypoints)}  queued  frame={frame}")
+        self._json({"ok": True, "seq": seq, "route_type": route_name,
+                    "waypoint_count": len(waypoints), "transport": "lora", "queued": True})
 
     def _handle_recovery(self, body: dict):
         payload_hex = body.get("payload_hex", "")
