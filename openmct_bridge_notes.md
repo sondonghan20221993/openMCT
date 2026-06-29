@@ -137,3 +137,22 @@ UP 프레임 경로: 지상 TX → Pi CP2102 RX 윈도우 → SB `UPLINK_RAW_MID
 ### 적용 대상
 LoRa 양방향은 `fc_serial_ws_server.py`(다운링크 WS + 업링크 HTTP 통합, 최신)를 사용한다.
 구버전 `lora_bridge.py` / `uplink_command_server.py` / `openmct_telemetry_server.py`는 잔재로 제거됨.
+
+## 향후 구현사항 (planned)
+
+### packet_loss per-source 분리 (현재 버그)
+
+**증상**: `packet_loss` 값이 비정상적으로 출렁임(과대).
+
+**원인**: `_update_link(seq)`가 FC 패킷과 SH 패킷 양쪽에서 호출되는데, FC/SH는
+**서로 독립된 seq 카운터**(다른 cFS 앱이 매김)인데도 전역 `_last_seq`/`_total_expected`/
+`_total_received`를 **공유**한다. 두 시퀀스가 번갈아 들어오면 gap이 무의미해져
+(`(seq_SH - seq_FC) & 0xFFFFFF`) `_total_expected`가 엉뚱하게 부풀어 loss가 왜곡된다.
+부차 요인: `1<=gap<=1000` 필터 밖이면 카운트 desync, 시작 후 누적이라 리셋 없음.
+
+**해결(권장)**: source별 분리 집계.
+- `_update_link(source, seq)` — `last_seq/expected/received`를 FC·SH **각각** 추적.
+- 내보내는 필드: `fc_packet_loss` / `sh_packet_loss` 분리(+ 해당 패킷 source의 `packet_loss`).
+- **대표 링크품질 = SH 기준** — SH는 FC 없이도 ~1Hz로 항상 와서 **LoRa RF 품질**을 깨끗이 반영.
+  FC loss는 FC UART + LoRa 합산(엔드투엔드 텔레메트리) 지표 → FC UART crc fail 진단에도 활용.
+- 서버(`fc_serial_ws_server.py`)만 수정, openMCT UI는 그대로.
