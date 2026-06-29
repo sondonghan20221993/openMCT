@@ -20,9 +20,11 @@ LoRa 다운링크 수신, WebSocket 스트리밍, 업링크 명령 전송을 단
 ### 1. LoRa 브리지 (다운링크 + 업링크 통합)
 
 ```powershell
-python fc_serial_ws_server.py --port COM7 --baud 57600 --http-port 8082
+python fc_serial_ws_server.py --baud 57600 --http-port 8082
 ```
 
+- `--port` 기본값 **`auto`** — LoRa USB(Silicon Labs CP210x, VID 0x10C4)를 자동 탐지. 노트북마다 COM 번호가 달라도 동작.
+- 자동 탐지 실패 또는 특정 포트 강제 시: `--port COM7` 처럼 명시.
 - `ws://127.0.0.1:8765` — Open MCT로 텔레메트리 broadcast
 - `http://127.0.0.1:8082` — 업링크 명령 수신 (**TDM 슬롯 정렬**: 큐 적재 후 downlink 수신 슬롯에 송신)
 

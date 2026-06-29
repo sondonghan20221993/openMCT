@@ -22,8 +22,11 @@ Open MCT (vite dev server: http://localhost:5173)
 단일 프로세스로 직렬 포트를 공유하며 다운링크(WS) + 업링크(HTTP)를 동시에 처리한다.
 
 ```
-python fc_serial_ws_server.py --port COM7 --baud 57600 --http-port 8082
+python fc_serial_ws_server.py --baud 57600 --http-port 8082
 ```
+
+`--port` 기본값은 **`auto`** — LoRa USB(Silicon Labs CP210x, VID `0x10C4`)를 자동 탐지한다.
+노트북마다 COM 번호가 달라도 고정 불필요. 탐지 실패/강제 시 `--port COM7` 명시.
 
 ### 다운링크 파서 (수신 → WS broadcast)
 

@@ -7,9 +7,9 @@ REM ===========================================================================
 setlocal
 set "ROOT=%~dp0"
 
-REM LoRa USB 시리얼 포트. 노트북마다 다르면 여기만 수정.
-REM (장치 관리자 > 포트(COM & LPT) 에서 번호 확인)
-if "%COMPORT%"=="" set "COMPORT=COM7"
+REM LoRa USB 시리얼 포트. 기본 auto = CP210x(Silicon Labs) 자동 탐지.
+REM 자동 탐지가 실패하거나 특정 포트를 강제하려면 COMx 로 변경. (예: set COMPORT=COM7)
+if "%COMPORT%"=="" set "COMPORT=auto"
 
 REM 1) LoRa 브리지 (downlink WebSocket + uplink HTTP)
 start "LoRa Bridge" cmd /k "cd /d "%ROOT%" && python fc_serial_ws_server.py --port %COMPORT% --baud 57600 --http-port 8082"

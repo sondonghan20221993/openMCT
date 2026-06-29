@@ -14,6 +14,7 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import serial
+from serial.tools import list_ports
 import websockets
 
 # ---------------------------------------------------------------------------
@@ -133,6 +134,32 @@ def _build_route_payload(route_type: int, route_version: int, waypoints: list) -
     for x, y, z in waypoints:
         payload += struct.pack("<fff", x, y, z)
     return payload
+
+
+# ---------------------------------------------------------------------------
+# 시리얼 포트 자동 탐지 (LoRa USB = Silicon Labs CP210x, VID 0x10C4)
+# 노트북마다 COM 번호가 달라 고정값(COM7)이 깨지는 문제 해결.
+# ---------------------------------------------------------------------------
+LORA_USB_VIDS     = {0x10C4}                              # Silicon Labs CP210x
+LORA_USB_KEYWORDS = ("CP210", "Silicon Labs", "USB Serial", "USB-SERIAL")
+
+
+def autodetect_serial_port() -> str:
+    ports = list(list_ports.comports())
+    # 1순위: VID 매칭 (CP210x)
+    for p in ports:
+        if p.vid in LORA_USB_VIDS:
+            return p.device
+    # 2순위: 설명/제조사 문자열 매칭
+    for p in ports:
+        text = f"{p.description} {p.manufacturer or ''}".lower()
+        if any(k.lower() in text for k in LORA_USB_KEYWORDS):
+            return p.device
+    # 후보가 하나뿐이면 그것으로
+    if len(ports) == 1:
+        return ports[0].device
+    avail = ", ".join(f"{p.device}({p.description})" for p in ports) or "(없음)"
+    raise RuntimeError(f"LoRa 시리얼 포트 자동탐지 실패 — --port 로 지정하세요. 사용 가능: {avail}")
 
 
 def _lora_send(frame: str) -> None:
@@ -485,6 +512,9 @@ async def serial_reader():
 
 async def main_async(serial_port: str, baudrate: int, http_port: int):
     global _ser
+    if serial_port.lower() == "auto":
+        serial_port = autodetect_serial_port()
+        print(f"[SERIAL] auto-detected {serial_port}")
     print(f"[SERIAL] opening {serial_port} @ {baudrate}")
     _ser = serial.Serial(serial_port, baudrate, timeout=1)
 
@@ -508,7 +538,7 @@ async def main_async(serial_port: str, baudrate: int, http_port: int):
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser(description="LoRa bridge: downlink WS + uplink HTTP on one serial port")
-    p.add_argument("--port",      default="COM7",  help="serial port (default: COM7)")
+    p.add_argument("--port",      default="auto",  help="serial port, or 'auto' to detect LoRa CP210x (default: auto)")
     p.add_argument("--baud",      type=int, default=57600, help="baud rate (default: 57600)")
     p.add_argument("--http-port", type=int, default=8082,  help="uplink HTTP port (default: 8082)")
     args = p.parse_args()
