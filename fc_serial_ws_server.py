@@ -25,12 +25,12 @@ WS_PORT = 8765
 
 clients: set = set()
 
-# Link quality
+# Link quality — per-source (FC와 SH는 서로 독립된 seq 카운터라 분리 집계)
 _heartbeat = 0
-_last_seq = None
-_total_expected = 0
-_total_received = 0
-_packet_loss = 0.0
+_link = {
+    "FC": {"last_seq": None, "expected": 0, "received": 0, "loss": 0.0},
+    "SH": {"last_seq": None, "expected": 0, "received": 0, "loss": 0.0},
+}
 
 # ---------------------------------------------------------------------------
 # Shared serial port
@@ -379,21 +379,26 @@ def parse_float(v):
     except: return None
 
 
-def _update_link(seq: int):
-    global _heartbeat, _last_seq, _total_expected, _total_received, _packet_loss
+def _update_link(source: str, seq: int):
+    """source별('FC'/'SH') seq gap으로 손실률 집계. 두 소스의 seq는 독립이므로 분리."""
+    global _heartbeat
     _heartbeat += 1
-    if _last_seq is not None:
-        gap = (seq - _last_seq) & 0xFFFFFF
+    st = _link.get(source)
+    if st is None:
+        return 0.0
+    if st["last_seq"] is not None:
+        gap = (seq - st["last_seq"]) & 0xFFFFFF
         if 1 <= gap <= 1000:
-            _total_expected += gap
-            _total_received += 1
+            st["expected"] += gap
+            st["received"] += 1
     else:
-        _total_expected += 1
-        _total_received += 1
-    _last_seq = seq
-    _packet_loss = round(
-        (_total_expected - _total_received) / _total_expected * 100.0, 1
-    ) if _total_expected > 0 else 0.0
+        st["expected"] += 1
+        st["received"] += 1
+    st["last_seq"] = seq
+    st["loss"] = round(
+        (st["expected"] - st["received"]) / st["expected"] * 100.0, 1
+    ) if st["expected"] > 0 else 0.0
+    return st["loss"]
 
 
 def parse_lora_line(line: str):
@@ -422,24 +427,33 @@ def parse_lora_line(line: str):
         alt_mm     = parse_int(parts[14])
         fix        = parse_int(parts[15])
         uplink_fb  = parse_int(parts[16])
+        rollspeed  = parse_float(parts[17]) if len(parts) >= 20 else None
+        pitchspeed = parse_float(parts[18]) if len(parts) >= 20 else None
+        yawspeed   = parse_float(parts[19]) if len(parts) >= 20 else None
 
         if any(v is None for v in [seq, ts_ms, roll, pitch, yaw, x, y, z, vx, vy, vz]):
             return None
 
-        _update_link(seq)
+        fc_loss = _update_link("FC", seq)
         data = {
             "timestamp": ts, "source": "FC",
             "seq": seq, "boot_ms": ts_ms,
             "roll": roll, "pitch": pitch, "yaw": yaw,
             "x": x, "y": y, "z": z,
             "vx": vx, "vy": vy, "vz": vz,
-            "heartbeat": _heartbeat, "packet_loss": _packet_loss,
+            "heartbeat": _heartbeat,
+            "packet_loss": fc_loss,
+            "fc_packet_loss": fc_loss,
+            "sh_packet_loss": _link["SH"]["loss"],
         }
-        if lat_e7    is not None: data["lat"]       = lat_e7 / 1e7
-        if lon_e7    is not None: data["lon"]       = lon_e7 / 1e7
-        if alt_mm    is not None: data["alt"]       = alt_mm / 1000.0
-        if fix       is not None: data["fix"]       = fix
-        if uplink_fb is not None: data["uplink_fb"] = uplink_fb
+        if lat_e7     is not None: data["lat"]        = lat_e7 / 1e7
+        if lon_e7     is not None: data["lon"]        = lon_e7 / 1e7
+        if alt_mm     is not None: data["alt"]        = alt_mm / 1000.0
+        if fix        is not None: data["fix"]        = fix
+        if uplink_fb  is not None: data["uplink_fb"]  = uplink_fb
+        if rollspeed  is not None: data["rollspeed"]  = rollspeed
+        if pitchspeed is not None: data["pitchspeed"] = pitchspeed
+        if yawspeed   is not None: data["yawspeed"]   = yawspeed
         return data
 
     if source == "SH" and len(parts) >= 7:
@@ -453,13 +467,16 @@ def parse_lora_line(line: str):
         if any(v is None for v in [seq, ts_ms, health_state, fault_code]):
             return None
 
-        _update_link(seq)
+        sh_loss = _update_link("SH", seq)
         return {
             "timestamp": ts, "source": "SH",
             "seq": seq, "boot_ms": ts_ms,
             "health_state": health_state, "fault_code": fault_code,
             "link_state": link_state, "uplink_fb": uplink_fb,
-            "heartbeat": _heartbeat, "packet_loss": _packet_loss,
+            "heartbeat": _heartbeat,
+            "packet_loss": sh_loss,
+            "sh_packet_loss": sh_loss,
+            "fc_packet_loss": _link["FC"]["loss"],
         }
 
     return None

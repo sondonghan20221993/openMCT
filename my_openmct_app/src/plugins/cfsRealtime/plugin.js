@@ -84,6 +84,10 @@ export default function cfsRealtimePlugin() {
             pitch: makeTelemetryPoint('pitch', 'Pitch', 'cfs:attitude-folder', 'float', 'rad'),
             yaw: makeTelemetryPoint('yaw', 'Yaw', 'cfs:attitude-folder', 'float', 'rad'),
 
+            rollspeed: makeTelemetryPoint('rollspeed', 'Roll Rate', 'cfs:attitude-folder', 'float', 'rad/s'),
+            pitchspeed: makeTelemetryPoint('pitchspeed', 'Pitch Rate', 'cfs:attitude-folder', 'float', 'rad/s'),
+            yawspeed: makeTelemetryPoint('yawspeed', 'Yaw Rate', 'cfs:attitude-folder', 'float', 'rad/s'),
+
             x: makeTelemetryPoint('x', 'X', 'cfs:position-folder', 'float', 'm'),
             y: makeTelemetryPoint('y', 'Y', 'cfs:position-folder', 'float', 'm'),
             z: makeTelemetryPoint('z', 'Z', 'cfs:position-folder', 'float', 'm'),
@@ -103,6 +107,8 @@ export default function cfsRealtimePlugin() {
             flags: makeTelemetryPoint('flags', 'EKF Flags', 'cfs:status-folder', 'integer', ''),
 
             packet_loss: makeTelemetryPoint('packet_loss', 'Packet Loss', 'cfs:status-folder', 'float', '%'),
+            sh_packet_loss: makeTelemetryPoint('sh_packet_loss', 'SH Packet Loss (RF)', 'cfs:status-folder', 'float', '%'),
+            fc_packet_loss: makeTelemetryPoint('fc_packet_loss', 'FC Packet Loss (E2E)', 'cfs:status-folder', 'float', '%'),
             heartbeat: makeTelemetryPoint('heartbeat', 'Heartbeat', 'cfs:status-folder', 'integer', ''),
             health_state: makeTelemetryPoint('health_state', 'Health State', 'cfs:status-folder', 'integer', ''),
             fault_code: makeTelemetryPoint('fault_code', 'Fault Code', 'cfs:status-folder', 'integer', '')
@@ -119,7 +125,10 @@ export default function cfsRealtimePlugin() {
             'attitude-folder': [
                 OBJECTS.roll.identifier,
                 OBJECTS.pitch.identifier,
-                OBJECTS.yaw.identifier
+                OBJECTS.yaw.identifier,
+                OBJECTS.rollspeed.identifier,
+                OBJECTS.pitchspeed.identifier,
+                OBJECTS.yawspeed.identifier
             ],
             'position-folder': [
                 OBJECTS.x.identifier,
@@ -141,6 +150,8 @@ export default function cfsRealtimePlugin() {
                 OBJECTS.boot_ms.identifier,
                 OBJECTS.flags.identifier,
                 OBJECTS.packet_loss.identifier,
+                OBJECTS.sh_packet_loss.identifier,
+                OBJECTS.fc_packet_loss.identifier,
                 OBJECTS.heartbeat.identifier,
                 OBJECTS.health_state.identifier,
                 OBJECTS.fault_code.identifier
