@@ -107,8 +107,6 @@ export default function cfsRealtimePlugin() {
             flags: makeTelemetryPoint('flags', 'EKF Flags', 'cfs:status-folder', 'integer', ''),
 
             packet_loss: makeTelemetryPoint('packet_loss', 'Packet Loss', 'cfs:status-folder', 'float', '%'),
-            sh_packet_loss: makeTelemetryPoint('sh_packet_loss', 'SH Packet Loss (RF)', 'cfs:status-folder', 'float', '%'),
-            fc_packet_loss: makeTelemetryPoint('fc_packet_loss', 'FC Packet Loss (E2E)', 'cfs:status-folder', 'float', '%'),
             heartbeat: makeTelemetryPoint('heartbeat', 'Heartbeat', 'cfs:status-folder', 'integer', ''),
             health_state: makeTelemetryPoint('health_state', 'Health State', 'cfs:status-folder', 'integer', ''),
             fault_code: makeTelemetryPoint('fault_code', 'Fault Code', 'cfs:status-folder', 'integer', '')
@@ -150,8 +148,6 @@ export default function cfsRealtimePlugin() {
                 OBJECTS.boot_ms.identifier,
                 OBJECTS.flags.identifier,
                 OBJECTS.packet_loss.identifier,
-                OBJECTS.sh_packet_loss.identifier,
-                OBJECTS.fc_packet_loss.identifier,
                 OBJECTS.heartbeat.identifier,
                 OBJECTS.health_state.identifier,
                 OBJECTS.fault_code.identifier
