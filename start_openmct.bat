@@ -1,20 +1,20 @@
 @echo off
 REM ===========================================================================
 REM start_openmct.bat
-REM 스크립트 자기 위치(%~dp0) 기준 경로 - 어느 노트북/Windows 사용자든 동작.
-REM (하드코딩 C:\Users\sdh97 제거)
+REM Script-relative paths (%~dp0) - works on any laptop / Windows user.
+REM (hardcoded C:\Users\sdh97 removed)
 REM ===========================================================================
 setlocal
 set "ROOT=%~dp0"
 
-REM LoRa USB 시리얼 포트. 기본 auto = CP210x(Silicon Labs) 자동 탐지.
-REM 자동 탐지가 실패하거나 특정 포트를 강제하려면 COMx 로 변경. (예: set COMPORT=COM7)
+REM LoRa USB serial port. Default auto = CP210x (Silicon Labs) auto-detect.
+REM If auto-detect fails or you must force a port, set COMx. (e.g. set COMPORT=COM7)
 if "%COMPORT%"=="" set "COMPORT=auto"
 
-REM 1) LoRa 브리지 (downlink WebSocket + uplink HTTP)
+REM 1) LoRa bridge (downlink WebSocket + uplink HTTP)
 start "LoRa Bridge" cmd /k "cd /d "%ROOT%" && python fc_serial_ws_server.py --port %COMPORT% --baud 57600 --http-port 8082"
 
-REM 2) OpenMCT UI (node_modules 없으면 자동 설치 후 vite dev)
+REM 2) OpenMCT UI (auto npm install if node_modules missing, then vite dev)
 start "OpenMCT UI" cmd /k "cd /d "%ROOT%my_openmct_app" && (if not exist node_modules npm install) && npm run dev"
 
 timeout /t 5 /nobreak >nul
