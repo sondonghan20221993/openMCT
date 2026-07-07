@@ -86,6 +86,8 @@ SH,<tx_count>,<ts_ms>,<health_state>,<fault_code>
 
 ## Uplink CLI 명령어
 
+> **예정**: 현재 텍스트 명령어(CLI) 방식의 업링크 인터페이스를 **GUI 방식으로 전환할 예정**입니다.
+
 Open MCT 좌측 트리에서 **cFS FC Telemetry → Uplink CLI** 클릭 후 사용:
 
 ```

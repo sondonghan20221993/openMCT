@@ -79,6 +79,12 @@ export default function cfsRealtimePlugin() {
                 type: 'uplink.terminal',
                 location: 'cfs:root'
             },
+            'uplink-gui': {
+                identifier: { namespace: 'cfs', key: 'uplink-gui' },
+                name: 'Uplink GUI',
+                type: 'uplink.gui',
+                location: 'cfs:root'
+            },
 
             roll: makeTelemetryPoint('roll', 'Roll', 'cfs:attitude-folder', 'float', 'rad'),
             pitch: makeTelemetryPoint('pitch', 'Pitch', 'cfs:attitude-folder', 'float', 'rad'),
@@ -118,7 +124,8 @@ export default function cfsRealtimePlugin() {
                 FOLDERS.position.identifier,
                 FOLDERS.gps.identifier,
                 FOLDERS.status.identifier,
-                { namespace: 'cfs', key: 'uplink-cli' }
+                { namespace: 'cfs', key: 'uplink-cli' },
+                { namespace: 'cfs', key: 'uplink-gui' }
             ],
             'attitude-folder': [
                 OBJECTS.roll.identifier,
