@@ -164,6 +164,87 @@ export default function cfsRealtimePlugin() {
         const latest = {};
         const subscribers = {};
         let socket = null;
+        let db = null;
+
+        // IndexedDB 초기화
+        function initIndexedDB() {
+            return new Promise((resolve, reject) => {
+                const request = indexedDB.open('cfsRealtime', 1);
+
+                request.onerror = () => {
+                    console.error('[cfsRealtime] IndexedDB open failed', request.error);
+                    reject(request.error);
+                };
+
+                request.onsuccess = () => {
+                    db = request.result;
+                    console.log('[cfsRealtime] IndexedDB initialized');
+                    resolve(db);
+                };
+
+                request.onupgradeneeded = (event) => {
+                    const newDb = event.target.result;
+                    if (!newDb.objectStoreNames.contains('telemetry')) {
+                        newDb.createObjectStore('telemetry', { keyPath: 'timestamp' });
+                        console.log('[cfsRealtime] telemetry store created');
+                    }
+                };
+            });
+        }
+
+        // IndexedDB에 저장
+        function saveTelemetryToIndexedDB(timestamp, data) {
+            if (!db) {
+                return;
+            }
+
+            try {
+                const transaction = db.transaction(['telemetry'], 'readwrite');
+                const store = transaction.objectStore('telemetry');
+                store.add({ timestamp, data });
+            } catch (e) {
+                console.error('[cfsRealtime] IndexedDB save error', e);
+            }
+        }
+
+        // IndexedDB에서 데이터 조회 (CSV 내보내기용)
+        function getAllTelemetryFromIndexedDB() {
+            return new Promise((resolve, reject) => {
+                if (!db) {
+                    reject(new Error('IndexedDB not initialized'));
+                    return;
+                }
+
+                const transaction = db.transaction(['telemetry'], 'readonly');
+                const store = transaction.objectStore('telemetry');
+                const request = store.getAll();
+
+                request.onsuccess = () => {
+                    resolve(request.result);
+                };
+
+                request.onerror = () => {
+                    reject(request.error);
+                };
+            });
+        }
+
+        // IndexedDB에서 데이터 삭제 (타임스탬프 범위)
+        function clearOldTelemetry(olderThanMs) {
+            if (!db) {
+                return;
+            }
+
+            try {
+                const transaction = db.transaction(['telemetry'], 'readwrite');
+                const store = transaction.objectStore('telemetry');
+                const range = IDBKeyRange.upperBound(olderThanMs);
+                store.delete(range);
+                console.log('[cfsRealtime] Cleared telemetry older than', olderThanMs);
+            } catch (e) {
+                console.error('[cfsRealtime] IndexedDB clear error', e);
+            }
+        }
 
         function connectWebSocket() {
             if (socket) {
@@ -189,6 +270,7 @@ export default function cfsRealtimePlugin() {
                 console.log('[cfsRealtime] message', msg);
 
                 const timestamp = msg.timestamp || Date.now();
+                const telemetryData = {};
 
                 Object.keys(OBJECTS).forEach((key) => {
                     if (key === 'root') {
@@ -207,11 +289,17 @@ export default function cfsRealtimePlugin() {
                     console.log('[cfsRealtime] datum', key, datum);
 
                     latest[key] = datum;
+                    telemetryData[key] = msg[key];
 
                     if (subscribers[key]) {
                         subscribers[key].forEach((callback) => callback(datum));
                     }
                 });
+
+                // IndexedDB에 저장
+                if (Object.keys(telemetryData).length > 0) {
+                    saveTelemetryToIndexedDB(timestamp, telemetryData);
+                }
             };
 
             socket.onerror = (error) => {
@@ -279,6 +367,15 @@ export default function cfsRealtimePlugin() {
             }
         });
 
-        connectWebSocket();
+        // IndexedDB 초기화 및 WebSocket 연결
+        initIndexedDB()
+            .then(() => {
+                console.log('[cfsRealtime] Ready to save telemetry to IndexedDB');
+                connectWebSocket();
+            })
+            .catch((error) => {
+                console.error('[cfsRealtime] Failed to initialize IndexedDB, continuing without storage', error);
+                connectWebSocket();
+            });
     };
 }

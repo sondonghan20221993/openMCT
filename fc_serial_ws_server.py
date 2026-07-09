@@ -6,10 +6,13 @@ LoRa bridge — single process owning the serial port.
 """
 import argparse
 import asyncio
+import csv
 import json
+import os
 import struct
 import threading
 import time
+from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -34,6 +37,56 @@ _last_seq = None
 _total_expected = 0
 _total_received = 0
 _packet_loss = 0.0
+
+# ---------------------------------------------------------------------------
+# CSV 저장 설정
+# ---------------------------------------------------------------------------
+CSV_DIR = "telemetry_logs"
+_csv_file = None
+_csv_writer = None
+_csv_lock = threading.Lock()
+_csv_fields = [
+    'timestamp', 'source',
+    'roll', 'pitch', 'yaw',
+    'x', 'y', 'z', 'vx', 'vy', 'vz',
+    'lat', 'lon', 'alt', 'fix',
+    'seq', 'boot_ms', 'health_state', 'fault_code',
+    'heartbeat', 'packet_loss'
+]
+
+def _init_csv():
+    """CSV 파일 초기화 (매일 새 파일)"""
+    global _csv_file, _csv_writer
+
+    try:
+        os.makedirs(CSV_DIR, exist_ok=True)
+
+        now = datetime.now()
+        filename = os.path.join(CSV_DIR, f"telemetry_{now.strftime('%Y%m%d_%H%M%S')}.csv")
+
+        _csv_file = open(filename, 'w', newline='')
+        _csv_writer = csv.DictWriter(_csv_file, fieldnames=_csv_fields)
+        _csv_writer.writeheader()
+        _csv_file.flush()
+
+        print(f"[CSV] Created {filename}")
+    except Exception as e:
+        print(f"[CSV] Error initializing CSV: {e}")
+
+def _save_telemetry_to_csv(data: dict) -> None:
+    """텔레메트리 데이터를 CSV에 저장"""
+    if not _csv_writer:
+        return
+
+    try:
+        with _csv_lock:
+            row = {field: '' for field in _csv_fields}
+            row['timestamp'] = datetime.now().isoformat()
+            row.update(data)
+            _csv_writer.writerow(row)
+            _csv_file.flush()
+    except Exception as e:
+        print(f"[CSV] Error saving to CSV: {e}")
 
 # ---------------------------------------------------------------------------
 # Shared serial port
@@ -518,16 +571,23 @@ async def serial_reader():
             continue
         msg = json.dumps(data)
         print("[OK]", msg)
+
+        # CSV에 저장
+        _save_telemetry_to_csv(data)
+
         await broadcast(msg)
 
 
 async def main_async(serial_port: str, baudrate: int, http_port: int):
-    global _ser
+    global _ser, _csv_file
     if serial_port.lower() == "auto":
         serial_port = autodetect_serial_port()
         print(f"[SERIAL] auto-detected {serial_port}")
     print(f"[SERIAL] opening {serial_port} @ {baudrate}")
     _ser = serial.Serial(serial_port, baudrate, timeout=1)
+
+    # CSV 초기화
+    _init_csv()
 
     # HTTP server in daemon thread
     http_server = ThreadingHTTPServer(("127.0.0.1", http_port), UplinkHandler)
@@ -542,6 +602,11 @@ async def main_async(serial_port: str, baudrate: int, http_port: int):
     try:
         await serial_reader()
     finally:
+        # CSV 파일 닫기
+        if _csv_file:
+            _csv_file.close()
+            print("[CSV] File closed")
+
         ws_server.close()
         await ws_server.wait_closed()
         http_server.shutdown()
