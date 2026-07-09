@@ -94,9 +94,11 @@ FC,<tx_count>,<ts_ms>,<roll>,<pitch>,<yaw>,<x>,<y>,<z>,<vx>,<vy>,<vz>,<lat_e7>,<
 SH,<tx_count>,<ts_ms>,<health_state>,<fault_code>
 ```
 
-## Uplink CLI 명령어
+## Uplink 인터페이스
 
-> **예정**: 현재 텍스트 명령어(CLI) 방식의 업링크 인터페이스를 **GUI 방식으로 전환할 예정**입니다.
+✅ **CLI** (텍스트 명령어) + **GUI** (폼 기반) 두 가지 제공
+
+### Option 1: Uplink CLI (텍스트 명령어)
 
 Open MCT 좌측 트리에서 **cFS FC Telemetry → Uplink CLI** 클릭 후 사용:
 
@@ -133,6 +135,33 @@ clear                                   터미널 초기화
 > config cfs_core bad_param 100
 [ERR] unknown param 'bad_param'  available: attitude_timeout_ms, bridge_timeout_ms, ...
 ```
+
+### Option 2: Uplink GUI (폼 기반)
+
+**권장**: 사용자 친화적, 입력값 검증 자동
+
+Open MCT 좌측 트리에서 **cFS FC Telemetry → Uplink GUI** 클릭 후 사용:
+
+```
+┌─────────────────────────────────────────┐
+│ ● 연결됨   latency=5ms   transport=lora │
+├─────────────────────────────────────────┤
+│ [명령 선택] CONFIG▼  [Scope] cfs_core▼  │
+│ [파라미터]  publish_period_ms▼          │
+│ [값]        [________]  ms              │
+│ [전송]  [RESET]  [RECOVERY]             │
+├─────────────────────────────────────────┤
+│ [OK] CONFIG accepted  seq=5              │
+│ [RECOVERY] sent  seq=6                   │
+└─────────────────────────────────────────┘
+```
+
+**특징**:
+- ✅ 자동 param 목록 조회 (서버에서 실시간)
+- ✅ 입력값 검증 (타입, 범위)
+- ✅ 폴백: 서버 응답 없으면 기본값 사용
+- ✅ 실행 결과 로그 표시
+- ✅ CLI보다 복잡한 명령도 쉽게 구성
 
 ## 알려진 한계 & 미해결 이슈
 
