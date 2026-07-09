@@ -3,6 +3,16 @@
 cFS 기반 UAV 텔레메트리를 브라우저 대시보드로 실시간 시각화하는 시스템입니다.  
 LoRa 다운링크 수신, WebSocket 스트리밍, 업링크 명령 전송을 단일 프로세스로 처리합니다.
 
+## ⚠️ 설계 상태 — TDM 구현 필수
+
+**현재**: 지상국(Windows) LoRa 브리지 완성 | **기체(Pi) RX 윈도우 미구현**
+
+- ✅ **지상국** (`fc_serial_ws_server.py`): TDM slot-aligned 업링크 구현 완료
+- ❌ **기체** (`lora_fc_downlink_app`): RX 윈도우 300ms 미구현 → **포트 충돌 현존**
+
+**필수 작업**: cfs-telemetry-app의 **lora_tdm_app 명세**에 따라 기체 코드를 수정해야 함.  
+참고: `notes/LORA_TDM_DESIGN_SPECIFICATION.md` (예상 작업량 7~10시간)
+
 ## 구성 요소
 
 | 파일 | 역할 |
@@ -124,6 +134,22 @@ clear                                   터미널 초기화
 [ERR] unknown param 'bad_param'  available: attitude_timeout_ms, bridge_timeout_ms, ...
 ```
 
-## 알려진 한계
+## 알려진 한계 & 미해결 이슈
 
-- **업링크 RF 충돌 → TDM 슬롯 정렬로 해결**: 아무 때나 UP를 쏘면 드론의 반이중 RX 윈도우(downlink TX 후 300ms)를 놓쳐 충돌/유실됨. `fc_serial_ws_server.py`가 UP 프레임을 큐에 적재 후 downlink 라인 수신 직후 슬롯에 전송하도록 처리(별도 COM 포트 불필요). 상세: `openmct_bridge_notes.md`.
+### P0 (치명) — 포트 충돌
+- **기체 LoRa 시리얼 포트 동시 접근**: `lora_fc_downlink_app`과 `uplink_app`이 동일 CP2102 포트를 동시에 열어 read 경쟁 발생. 
+- **근본 원인**: lora_tdm_app의 TDM RX 윈도우 설계가 lora_fc_downlink_app 리네임 과정에서 버려짐.
+- **해결**: `notes/LORA_TDM_DESIGN_SPECIFICATION.md` 따라 구현 (7~10h).
+- **참고**: `cfs-telemetry-app/notes/lora_tdm_app_behavior_spec.md` (권위 명세).
+
+### P1 (높음)
+- **packet_loss per-source 분리**: FC/SH의 서로 다른 seq를 통합으로 계산하면 loss 왜곡됨. 분리 추적 필요.
+- **업링크 RF 충돌**: TDM RX 윈도우 미구현 상태에서 RF 반이중 충돌 방어 불가.
+
+### P2 (낮음)
+- **RSSI / SNR 미지원**: LoRa 모듈이 투명 UART 모드 — 하드웨어 모드 변경 필요.
+- **GPS sats 필드 미지원**: 패킷 포맷 확장 필요.
+
+### 상세
+- 미해결 이슈: `notes/solve_porting_py_to_c.md` §14.
+- 설계 현황: `openmct_bridge_notes.md`.
