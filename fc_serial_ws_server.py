@@ -200,22 +200,42 @@ LORA_USB_VIDS     = {0x10C4}                              # Silicon Labs CP210x
 LORA_USB_KEYWORDS = ("CP210", "Silicon Labs", "USB Serial", "USB-SERIAL")
 
 
-def autodetect_serial_port() -> str:
-    ports = list(list_ports.comports())
-    # 1순위: VID 매칭 (CP210x)
-    for p in ports:
-        if p.vid in LORA_USB_VIDS:
-            return p.device
-    # 2순위: 설명/제조사 문자열 매칭
-    for p in ports:
-        text = f"{p.description} {p.manufacturer or ''}".lower()
-        if any(k.lower() in text for k in LORA_USB_KEYWORDS):
-            return p.device
-    # 후보가 하나뿐이면 그것으로
-    if len(ports) == 1:
-        return ports[0].device
-    avail = ", ".join(f"{p.device}({p.description})" for p in ports) or "(없음)"
-    raise RuntimeError(f"LoRa 시리얼 포트 자동탐지 실패 — --port 로 지정하세요. 사용 가능: {avail}")
+def autodetect_serial_port(with_retry: bool = False, retry_interval: int = 5) -> str:
+    """
+    자동 탐지로 LoRa 시리얼 포트 찾기.
+    with_retry=True 시 모듈을 찾을 때까지 재시도 (retry_interval초마다).
+    """
+    attempt = 0
+    while True:
+        attempt += 1
+        ports = list(list_ports.comports())
+        # 1순위: VID 매칭 (CP210x)
+        for p in ports:
+            if p.vid in LORA_USB_VIDS:
+                if attempt > 1:
+                    print(f"[SERIAL] ✅ LoRa 모듈 감지됨 (시도 #{attempt})")
+                return p.device
+        # 2순위: 설명/제조사 문자열 매칭
+        for p in ports:
+            text = f"{p.description} {p.manufacturer or ''}".lower()
+            if any(k.lower() in text for k in LORA_USB_KEYWORDS):
+                if attempt > 1:
+                    print(f"[SERIAL] ✅ LoRa 모듈 감지됨 (시도 #{attempt})")
+                return p.device
+        # 후보가 하나뿐이면 그것으로
+        if len(ports) == 1:
+            if attempt > 1:
+                print(f"[SERIAL] ✅ LoRa 모듈 감지됨 (시도 #{attempt})")
+            return ports[0].device
+
+        # 실패한 경우
+        avail = ", ".join(f"{p.device}({p.description})" for p in ports) or "(없음)"
+        if not with_retry:
+            raise RuntimeError(f"LoRa 시리얼 포트 자동탐지 실패 — --port 로 지정하세요. 사용 가능: {avail}")
+
+        # 재시도 모드: 계속 기다리기
+        print(f"[SERIAL] ⏳ LoRa 모듈 미감지 (시도 #{attempt}). {retry_interval}초 후 재시도... 사용 가능: {avail}")
+        time.sleep(retry_interval)
 
 
 def _lora_send(frame: str) -> None:
@@ -578,11 +598,10 @@ async def serial_reader():
         await broadcast(msg)
 
 
-async def main_async(serial_port: str, baudrate: int, http_port: int):
+async def main_async(serial_port: str, baudrate: int, http_port: int, enable_lora_retry: bool = True):
     global _ser, _csv_file
     if serial_port.lower() == "auto":
-        serial_port = autodetect_serial_port()
-        print(f"[SERIAL] auto-detected {serial_port}")
+        serial_port = autodetect_serial_port(with_retry=enable_lora_retry, retry_interval=5)
     print(f"[SERIAL] opening {serial_port} @ {baudrate}")
     _ser = serial.Serial(serial_port, baudrate, timeout=1)
 
@@ -617,6 +636,8 @@ if __name__ == "__main__":
     p.add_argument("--port",      default="auto",  help="serial port, or 'auto' to detect LoRa CP210x (default: auto)")
     p.add_argument("--baud",      type=int, default=57600, help="baud rate (default: 57600)")
     p.add_argument("--http-port", type=int, default=8082,  help="uplink HTTP port (default: 8082)")
+    p.add_argument("--no-lora-retry", action="store_true", help="LoRa 모듈 탐지 실패 시 재시도하지 않고 즉시 종료")
     args = p.parse_args()
 
-    asyncio.run(main_async(args.port, args.baud, args.http_port))
+    enable_lora_retry = not args.no_lora_retry
+    asyncio.run(main_async(args.port, args.baud, args.http_port, enable_lora_retry))

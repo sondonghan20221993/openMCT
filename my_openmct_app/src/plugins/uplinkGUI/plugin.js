@@ -49,6 +49,11 @@ export default function uplinkGUIPlugin(serverUrl = DEFAULT_SERVER) {
                 let logEl = null;
                 let els = {};   // 폼 요소 참조
 
+                // Downlink UFB (Uplink Feedback) monitoring
+                let downlinkSocket = null;
+                let pendingCommand = null;  // { kind, seq, timestamp, retryCount, describe, resend }
+                let ufbTimeoutHandle = null;
+
                 function log(text, cls) {
                     if (!logEl) return;
                     const line = document.createElement('div');
@@ -65,6 +70,75 @@ export default function uplinkGUIPlugin(serverUrl = DEFAULT_SERVER) {
                         body: JSON.stringify(body),
                     });
                     return res.json();
+                }
+
+                // --- Downlink UFB monitoring (WebSocket) ---
+                function connectDownlinkSocket() {
+                    if (downlinkSocket) return;
+                    downlinkSocket = new WebSocket('ws://127.0.0.1:8765');
+                    downlinkSocket.onmessage = (event) => {
+                        try {
+                            const msg = JSON.parse(event.data);
+                            if (msg.uplink_fb !== undefined) {
+                                onUFBReceived(msg.uplink_fb);
+                            }
+                        } catch { }
+                    };
+                    downlinkSocket.onclose = () => {
+                        downlinkSocket = null;
+                        setTimeout(connectDownlinkSocket, 1000);
+                    };
+                    downlinkSocket.onerror = () => {
+                        downlinkSocket?.close();
+                    };
+                }
+
+                function armPendingCommand(kind, seq, describe, resend) {
+                    clearPendingCommand();
+                    pendingCommand = { kind, seq, timestamp: Date.now(), retryCount: 0, describe, resend };
+                    ufbTimeoutHandle = setTimeout(() => {
+                        if (pendingCommand) {
+                            log(`[⏱️ Timeout] 기체 응답 없음 (>1s) — ${pendingCommand.describe()}`, 'ug-err');
+                            pendingCommand = null;
+                        }
+                    }, 1000);
+                }
+
+                function clearPendingCommand() {
+                    if (ufbTimeoutHandle) {
+                        clearTimeout(ufbTimeoutHandle);
+                        ufbTimeoutHandle = null;
+                    }
+                    pendingCommand = null;
+                }
+
+                function onUFBReceived(ufb) {
+                    if (!pendingCommand) return;
+                    if (ufbTimeoutHandle) clearTimeout(ufbTimeoutHandle);
+
+                    if (ufb === 0) {
+                        log(`[✅ UFB=0] 기체가 명령을 수신했습니다! ${pendingCommand.describe()} (적용됨)`, 'ug-ok');
+                        clearPendingCommand();
+                    } else if (ufb === 1) {
+                        pendingCommand.retryCount++;
+                        if (pendingCommand.retryCount <= 3) {
+                            log(`[❌ UFB=1] CRC 오류! 자동으로 다시 전송합니다... (${pendingCommand.retryCount}/3)`, 'ug-err');
+                            pendingCommand.timestamp = Date.now();
+                            ufbTimeoutHandle = setTimeout(() => {
+                                if (pendingCommand) {
+                                    log(`[⏱️ Timeout] 재전송 응답 없음 (>1s)`, 'ug-err');
+                                    pendingCommand = null;
+                                }
+                            }, 1000);
+                            pendingCommand.resend();
+                        } else {
+                            log(`[❌] CRC 재전송 3회 실패 — ${pendingCommand.describe()}`, 'ug-err');
+                            clearPendingCommand();
+                        }
+                    } else if (ufb === 2) {
+                        log(`[⚠️ UFB=2] 시퀀스 오류, 수동으로 다시 시도하세요 — ${pendingCommand.describe()}`, 'ug-warn');
+                        clearPendingCommand();
+                    }
                 }
 
                 // --- 상단 상태바: health + meta 자동 조회 (CLI의 uplinktest 대체) ---
@@ -126,6 +200,9 @@ export default function uplinkGUIPlugin(serverUrl = DEFAULT_SERVER) {
                         const json = await postJSON('/api/uplink/config', { scope, param, value });
                         if (json.ok) {
                             log(`[OK] CONFIG accepted  seq=${json.seq}  ${json.scope}.${json.param}=${json.value}`, 'ug-ok');
+                            const describe = () => `config ${scope}.${param}=${value}`;
+                            const resend = () => sendConfig();
+                            armPendingCommand('config', json.seq, describe, resend);
                         } else {
                             const hint = json.available ? `  available: ${json.available.join(', ')}` : '';
                             log(`[ERR] ${json.error}${hint}`, 'ug-err');
@@ -158,6 +235,9 @@ export default function uplinkGUIPlugin(serverUrl = DEFAULT_SERVER) {
                         const json = await postJSON('/api/uplink/route', { route_type: routeType, waypoints });
                         if (json.ok) {
                             log(`[OK] ROUTE sent  seq=${json.seq}  ${json.route_type}  wps=${json.waypoint_count}`, 'ug-ok');
+                            const describe = () => `route ${routeType} (${waypoints.length} waypoints)`;
+                            const resend = () => sendRoute();
+                            armPendingCommand('route', json.seq, describe, resend);
                         } else {
                             log(`[ERR] ${json.error}`, 'ug-err');
                         }
@@ -174,6 +254,9 @@ export default function uplinkGUIPlugin(serverUrl = DEFAULT_SERVER) {
                         const json = await postJSON('/api/uplink/recovery', body);
                         if (json.ok) {
                             log(`[OK] RECOVERY sent  seq=${json.seq}`, 'ug-ok');
+                            const describe = () => `recovery ${hex ? `(${hex.length} bytes)` : '(default)'}`;
+                            const resend = () => sendRecovery();
+                            armPendingCommand('recovery', json.seq, describe, resend);
                         } else {
                             log(`[ERR] ${json.error}`, 'ug-err');
                         }
@@ -283,9 +366,15 @@ export default function uplinkGUIPlugin(serverUrl = DEFAULT_SERVER) {
 
                         log('cFS Uplink GUI (prototype) — 서버 연결을 확인합니다', 'ug-info');
                         refreshStatus();
+                        connectDownlinkSocket();
                     },
 
                     destroy() {
+                        if (downlinkSocket) {
+                            downlinkSocket.close();
+                            downlinkSocket = null;
+                        }
+                        clearPendingCommand();
                         logEl = null;
                         els = {};
                     },

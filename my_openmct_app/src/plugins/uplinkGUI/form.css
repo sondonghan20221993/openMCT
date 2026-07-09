@@ -138,3 +138,4 @@ input.ug-text { flex: 1; }
 .ug-ok   { color: #70c990; }
 .ug-err  { color: #e06c75; }
 .ug-info { color: #777; }
+.ug-warn { color: #d89d3f; }
