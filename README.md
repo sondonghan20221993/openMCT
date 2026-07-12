@@ -103,11 +103,12 @@ npm run dev
 **v1 (현행, `lora_tdm_app` 출력 ASCII CSV)**:
 
 ```
-FC,<seq>,<ts_ms>,<roll>,<pitch>,<yaw>,<x>,<y>,<z>,<vx>,<vy>,<vz>,<lat_e7>,<lon_e7>,<alt_mm>,<fix>,<ufb>
+FC,<seq>,<ts_ms>,<roll>,<pitch>,<yaw>,<x>,<y>,<z>,<vx>,<vy>,<vz>,<lat_e7>,<lon_e7>,<alt_mm>,<fix>,<ufb>,<sats>
 SH,<seq>,<ts_ms>,<state>,<fault>,<linkstate>,<ufb>
 ```
 
-FC 17필드 / SH 7필드. 필드 상세 정의(단위·스케일)는
+FC 18필드(2026-07-13: sats 추가, 하위호환 — 구17필드 프레임도 계속 파싱됨) / SH 7필드.
+필드 상세 정의(단위·스케일)는
 `cfs-telemetry-app/notes/lora_tdm_app_behavior_spec.md` §8 참조 — 본 문서는 요약일 뿐
 단일 원본이 아니다.
 

@@ -35,11 +35,14 @@ python fc_serial_ws_server.py --baud 57600 --http-port 8082
 `notes/lora_tdm_app_behavior_spec.md` §8과 필드 수 일치):
 
 ```
-FC,<seq>,<ts_ms>,<roll>,<pitch>,<yaw>,<x>,<y>,<z>,<vx>,<vy>,<vz>,<lat_e7>,<lon_e7>,<alt_mm>,<fix>,<uplink_fb>[,<rollspeed>,<pitchspeed>,<yawspeed>]
+FC,<seq>,<ts_ms>,<roll>,<pitch>,<yaw>,<x>,<y>,<z>,<vx>,<vy>,<vz>,<lat_e7>,<lon_e7>,<alt_mm>,<fix>,<uplink_fb>,<sats>[,<rollspeed>,<pitchspeed>,<yawspeed>]
 SH,<seq>,<ts_ms>,<health_state>,<fault_code>,<link_state>,<uplink_fb>
 ```
 
-FC는 17필드 필수 + rollspeed/pitchspeed/yawspeed 3필드 선택(20필드 시에만 파싱).
+FC는 17필드 필수 + sats(1필드, 18필드 시 파싱, 2026-07-13 추가) +
+rollspeed/pitchspeed/yawspeed 3필드 선택(idx 19~21, 22필드 시에만 파싱 — sats가
+idx 17을 선점했으므로 rollspeed 그룹은 그 뒤로 밀림. rollspeed는 기체 인코더가
+실제로 내보낸 적 없는 미구현 확장이며 idx만 예약돼 있음).
 SH는 7필드. (구버전 서술이던 FC 16필드/SH 5필드는 틀렸음 — uplink_fb, link_state 등이
 lora_tdm_app 대에 추가된 것을 이 문서가 못 따라갔던 것, 2026-07-13 정정)
 
@@ -60,6 +63,7 @@ WS broadcast JSON 필드:
 | `lat/lon` | FC | deg (1e-7 변환) |
 | `alt` | FC | m (mm 변환) |
 | `fix` | FC | GPS fix type |
+| `sats` | FC | 가시 위성 수 (SatellitesVisible, 2026-07-13 추가 — fix_type이 이진 게이트라면 sats는 품질 추세) |
 | `uplink_fb` | FC/SH | 0=OK 1=CRC_FAIL 2=SEQ_FAIL |
 | `link_state` | SH | lora_tdm_app 링크 상태 (지상 계산 아님, 기체 자체 판단) |
 | `health_state` | SH | 0=NOMINAL 1=DEGRADED 2=RECOVERY |

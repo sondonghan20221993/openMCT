@@ -49,7 +49,7 @@ _csv_fields = [
     'timestamp', 'source',
     'roll', 'pitch', 'yaw',
     'x', 'y', 'z', 'vx', 'vy', 'vz',
-    'lat', 'lon', 'alt', 'fix',
+    'lat', 'lon', 'alt', 'fix', 'sats',
     'seq', 'boot_ms', 'health_state', 'fault_code',
     'heartbeat', 'packet_loss',
     'uplink_fb', 'link_state',            # parse_lora_line이 채우지만 기존 목록에 누락돼 있었음
@@ -502,9 +502,14 @@ def parse_lora_line(line: str):
         alt_mm     = parse_int(parts[14])
         fix        = parse_int(parts[15])
         uplink_fb  = parse_int(parts[16])
-        rollspeed  = parse_float(parts[17]) if len(parts) >= 20 else None
-        pitchspeed = parse_float(parts[18]) if len(parts) >= 20 else None
-        yawspeed   = parse_float(parts[19]) if len(parts) >= 20 else None
+        # 필드 18: sats (SatellitesVisible) — lora_tdm_app 2026-07-13 추가.
+        # 주의: 예전에 예약해뒀던 "len>=20이면 rollspeed/pitch/yawspeed가 idx 17~19"
+        # 가정은 기체 인코더가 한 번도 구현한 적 없는 죽은 경로였음. sats가 idx 17을
+        # 선점하므로, rollspeed 확장을 나중에 추가한다면 idx 19~21로 밀어야 한다.
+        sats       = parse_int(parts[17]) if len(parts) >= 18 else None
+        rollspeed  = parse_float(parts[19]) if len(parts) >= 22 else None
+        pitchspeed = parse_float(parts[20]) if len(parts) >= 22 else None
+        yawspeed   = parse_float(parts[21]) if len(parts) >= 22 else None
 
         if any(v is None for v in [seq, ts_ms, roll, pitch, yaw, x, y, z, vx, vy, vz]):
             return None
@@ -518,6 +523,7 @@ def parse_lora_line(line: str):
             "vx": vx, "vy": vy, "vz": vz,
             "heartbeat": _heartbeat, "packet_loss": _packet_loss,
         }
+        if sats       is not None: data["sats"]       = sats
         if lat_e7     is not None: data["lat"]        = lat_e7 / 1e7
         if lon_e7     is not None: data["lon"]        = lon_e7 / 1e7
         if alt_mm     is not None: data["alt"]        = alt_mm / 1000.0
