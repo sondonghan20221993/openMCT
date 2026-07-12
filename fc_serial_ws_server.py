@@ -51,7 +51,9 @@ _csv_fields = [
     'x', 'y', 'z', 'vx', 'vy', 'vz',
     'lat', 'lon', 'alt', 'fix',
     'seq', 'boot_ms', 'health_state', 'fault_code',
-    'heartbeat', 'packet_loss'
+    'heartbeat', 'packet_loss',
+    'uplink_fb', 'link_state',            # parse_lora_line이 채우지만 기존 목록에 누락돼 있었음
+    '_ack_send_ms', '_rx_total_ms',       # Stage 1/2 실측용 (openmct_bridge_notes.md 참조)
 ]
 
 def _init_csv():
@@ -575,24 +577,48 @@ async def broadcast(msg: str):
         clients.discard(c)
 
 
+def _send_ack(seq) -> None:
+    """다운링크 seq에 대한 keepalive ACK 회신 (Stage 1, 2026-07-13 추가).
+
+    lora_tdm_app_behavior_spec.md §11: 기체는 ACK 수신을 LinkState=CONNECTED
+    keepalive로 사용한다. 지금까지 이 서버가 ACK를 보내지 않아 지상 화면(OK)과
+    기체 판단(LinkState)이 어긋날 수 있었다 — 이 함수로 그 갭을 메운다.
+    """
+    if seq is None:
+        return
+    _lora_send(f"ACK,{seq}")
+
+
 async def serial_reader():
     while True:
+        rx_start = time.monotonic()
         raw = await asyncio.to_thread(_ser.readline)
         if not raw:
             await asyncio.sleep(0.01)
             continue
         line = raw.decode(errors="ignore").strip()
         # downlink 라인 수신 = Pi가 방금 TX함 = RX 윈도우(300ms)가 지금 열림.
-        # 대기 중인 uplink 프레임을 이 슬롯에 즉시 전송(TDM 정렬).
-        _flush_pending_uplink()
+        # ACK를 먼저 보내 keepalive를 확보한 뒤, 남는 시간에 pending uplink를 flush한다.
+        # (같은 슬롯에서 ACK/UP이 경합하면 링크 keepalive가 더 중요 — 우선순위 고정)
         data = parse_lora_line(line)
         if data is None:
             print("[BAD]", line)
+            _flush_pending_uplink()
             continue
-        msg = json.dumps(data)
-        print("[OK]", msg)
 
-        # CSV에 저장
+        ack_start = time.monotonic()
+        _send_ack(data.get("seq"))
+        ack_elapsed_ms = (time.monotonic() - ack_start) * 1000.0
+
+        _flush_pending_uplink()
+
+        msg = json.dumps(data)
+        rx_elapsed_ms = (time.monotonic() - rx_start) * 1000.0
+        print(f"[OK] {msg}  (ack_send={ack_elapsed_ms:.1f}ms total={rx_elapsed_ms:.1f}ms)")
+
+        # CSV에 저장 (계측값 포함 — Stage 1/2 실측 런북 참조)
+        data["_ack_send_ms"] = round(ack_elapsed_ms, 2)
+        data["_rx_total_ms"] = round(rx_elapsed_ms, 2)
         _save_telemetry_to_csv(data)
 
         await broadcast(msg)
