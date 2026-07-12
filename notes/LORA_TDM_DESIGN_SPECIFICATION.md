@@ -1,18 +1,26 @@
 # LoRa TDM 설계 명세
 
-**최종 수정**: 2026-07-09  
-**상태**: 기체(Pi) 쪽 구현 필요 | 지상국(Windows) 쪽 구현 완료
+**최종 수정**: 2026-07-09
+**상태**: ⚠️ **구설계 이력 문서 — 현행 아님 (2026-07-13 격하)**
+
+> 이 문서는 삭제된 구앱 `lora_fc_downlink_app` 기준으로 작성되었다. 기체는
+> 이미 `lora_tdm_app`으로 대체 완료(cfs-telemetry-app `notes/lora_tdm_app_behavior_spec.md`,
+> `notes/lora_protocol_v2_spec.md`)되어 있고, 본 문서의 프레임 필드 수·ACK 방향 서술은
+> 현행과 다르다 (예: 본 문서는 ACK를 "기체→지상"이라 적은 곳과 "지상→기체"로 파싱하는
+> 코드 스니펫이 같은 문서 안에 공존 — 실제로는 지상→기체가 맞다, README.md 참조).
+> **이 문서의 프레임 포맷/시퀀스는 신뢰하지 말 것.** 아래는 TDM 개념 이해용 이력으로만 보존한다.
 
 ---
 
-## 1. 설계 원칙
+## 1. 설계 원칙 (구버전 서술 — 아래도 동일하게 낡음)
 
 openMCT 시스템의 LoRa 통신은 **cfs-telemetry-app의 lora_tdm_app 동작 명세**를 따른다.
 이 문서는 기체-지상국 간 인터페이스를 명시하며, 양쪽이 동일한 이해 하에 구현해야 한다.
 
 참조:
-- `cfs-telemetry-app/notes/lora_tdm_app_behavior_spec.md` (권위 문서)
-- 이 문서 (openMCT 구현 현황)
+- `cfs-telemetry-app/notes/lora_tdm_app_behavior_spec.md` (v1, 권위 문서)
+- `cfs-telemetry-app/notes/lora_protocol_v2_spec.md` (v2, 권위 문서·설계 확정)
+- 이 문서 (구버전 openMCT 구현 현황 — 참고용, 비권위)
 
 ---
 

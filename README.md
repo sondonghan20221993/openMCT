@@ -3,15 +3,28 @@
 cFS 기반 UAV 텔레메트리를 브라우저 대시보드로 실시간 시각화하는 시스템입니다.  
 LoRa 다운링크 수신, WebSocket 스트리밍, 업링크 명령 전송을 단일 프로세스로 처리합니다.
 
-## ⚠️ 설계 상태 — TDM 구현 필수
+## ⚠️ 설계 상태 (2026-07-13 현행화)
 
-**현재**: 지상국(Windows) LoRa 브리지 완성 | **기체(Pi) RX 윈도우 미구현**
+기체측은 `lora_fc_downlink_app`(삭제됨)에서 **`lora_tdm_app`으로 대체 완료** —
+TDM 1000ms 주기 + RX 윈도우 300ms 구현되어 있음 (cfs-telemetry-app
+`notes/lora_tdm_app_behavior_spec.md`). 아래 갭은 "미구현"이 아니라
+지상(본 리포)이 기체 spec을 아직 못 따라간 상태.
 
-- ✅ **지상국** (`fc_serial_ws_server.py`): TDM slot-aligned 업링크 구현 완료
-- ❌ **기체** (`lora_fc_downlink_app`): RX 윈도우 300ms 미구현 → **포트 충돌 현존**
+- ✅ **지상국** (`fc_serial_ws_server.py`): TDM slot-aligned 업링크, v1 다운링크 파싱 구현 완료
+- ❌ **지상 ACK 송신 없음**: 기체는 지상의 `ACK,<seq>\n`을 링크 keepalive로 요구하는데
+  (behavior spec §11) 본 서버는 보내지 않음 → 기체 `LinkState`가 CONNECTED로 못 감.
+  실링크 시험 때는 사람이 수동으로 `ACK,<seq>\n`을 주입해왔음 (임시방편, 상시 운용 불가).
+- ⏳ **프로토콜 v2(바이너리) 미수신**: 다운링크 실효 갱신율을 0.77Hz→5Hz로 올리는
+  바이너리 프레임(DL2/UP2/ACK2)이 설계 확정됨. 본 서버의 `readline()` 기반 수신 루프는
+  종단문자 없는 바이너리를 못 받으므로 상태머신 교체 필요.
 
-**필수 작업**: cfs-telemetry-app의 **lora_tdm_app 명세**에 따라 기체 코드를 수정해야 함.  
-참고: `notes/LORA_TDM_DESIGN_SPECIFICATION.md` (예상 작업량 7~10시간)
+**단일 원본(wire format)**: `cfs-telemetry-app/notes/lora_tdm_app_behavior_spec.md`(v1),
+`notes/lora_protocol_v2_spec.md`(v2). 본 문서의 프레임 포맷 서술은 참조일 뿐이며
+불일치 시 위 spec이 우선한다 (cansat_2 `docs/04-repository-map.md` §3).
+
+**다음 작업**: ① 지상 ACK 송신 추가 ② v2 수신(DL2)·ACK2 회신 통합.
+(구 항목 "기체 lora_tdm_app 포팅"은 완료되어 제거됨 — 아래 `LORA_TDM_DESIGN_SPECIFICATION.md`는
+구설계 이력 문서로 격하.)
 
 ## 구성 요소
 
@@ -87,12 +100,21 @@ npm run dev
 
 ## LoRa 수신 포맷
 
-`lora_fc_downlink_app`이 출력하는 ASCII CSV:
+**v1 (현행, `lora_tdm_app` 출력 ASCII CSV)**:
 
 ```
-FC,<tx_count>,<ts_ms>,<roll>,<pitch>,<yaw>,<x>,<y>,<z>,<vx>,<vy>,<vz>,<lat_e7>,<lon_e7>,<alt_mm>,<fix_type>
-SH,<tx_count>,<ts_ms>,<health_state>,<fault_code>
+FC,<seq>,<ts_ms>,<roll>,<pitch>,<yaw>,<x>,<y>,<z>,<vx>,<vy>,<vz>,<lat_e7>,<lon_e7>,<alt_mm>,<fix>,<ufb>
+SH,<seq>,<ts_ms>,<state>,<fault>,<linkstate>,<ufb>
 ```
+
+FC 17필드 / SH 7필드. 필드 상세 정의(단위·스케일)는
+`cfs-telemetry-app/notes/lora_tdm_app_behavior_spec.md` §8 참조 — 본 문서는 요약일 뿐
+단일 원본이 아니다.
+
+`fc_serial_ws_server.py`는 지상→기체 `ACK,<seq>\n`을 **보내지 않는다** (위 상태 섹션 참조).
+
+**v2 (바이너리, 설계 확정·구현 예정)**: DL2/UP2/ACK2 프레임.
+`cfs-telemetry-app/notes/lora_protocol_v2_spec.md` 참조.
 
 ## Uplink 인터페이스
 

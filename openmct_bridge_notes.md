@@ -1,13 +1,14 @@
 # Open MCT Bridge Notes
 
-## 구현 현황 (2026-06-08)
+## 구현 현황 (2026-06-08, 필드/상태 갱신 2026-07-13)
 
 Open MCT 앱 및 PC-side LoRa 브리지가 완성되어 동작 중이다.
+단, **지상→기체 ACK 송신은 미구현** — §"링크 상태 갭" 참조.
 
 ## 데이터 흐름
 
 ```
-드론 lora_fc_downlink_app
+드론 lora_tdm_app  (구 lora_fc_downlink_app — 삭제됨)
   → LoRa RF
     → PC COM7 (Silicon Labs CP210x, 57600 baud)
       → fc_serial_ws_server.py
@@ -30,12 +31,17 @@ python fc_serial_ws_server.py --baud 57600 --http-port 8082
 
 ### 다운링크 파서 (수신 → WS broadcast)
 
-수신 포맷:
+수신 포맷 (현행, `parse_lora_line()` 실구현 기준 — cfs-telemetry-app
+`notes/lora_tdm_app_behavior_spec.md` §8과 필드 수 일치):
 
 ```
-FC,<tx_count>,<ts_ms>,<roll>,<pitch>,<yaw>,<x>,<y>,<z>,<vx>,<vy>,<vz>,<lat_e7>,<lon_e7>,<alt_mm>,<fix_type>
-SH,<tx_count>,<ts_ms>,<health_state>,<fault_code>
+FC,<seq>,<ts_ms>,<roll>,<pitch>,<yaw>,<x>,<y>,<z>,<vx>,<vy>,<vz>,<lat_e7>,<lon_e7>,<alt_mm>,<fix>,<uplink_fb>[,<rollspeed>,<pitchspeed>,<yawspeed>]
+SH,<seq>,<ts_ms>,<health_state>,<fault_code>,<link_state>,<uplink_fb>
 ```
+
+FC는 17필드 필수 + rollspeed/pitchspeed/yawspeed 3필드 선택(20필드 시에만 파싱).
+SH는 7필드. (구버전 서술이던 FC 16필드/SH 5필드는 틀렸음 — uplink_fb, link_state 등이
+lora_tdm_app 대에 추가된 것을 이 문서가 못 따라갔던 것, 2026-07-13 정정)
 
 단위 변환:
 - `lat = lat_e7 / 1e7` (degrees)
@@ -46,7 +52,7 @@ WS broadcast JSON 필드:
 
 | 필드 | 출처 | 비고 |
 |------|------|------|
-| `seq` | tx_count | FC+SH 공유 카운터 |
+| `seq` | FC/SH seq | 소스별 독립 카운터 (§"링크 상태 갭" 참조 — heartbeat/packet_loss는 통합 처리) |
 | `boot_ms` | ts_ms | FC 측 타임스탬프 |
 | `roll/pitch/yaw` | FC | rad |
 | `x/y/z` | FC | m |
@@ -54,10 +60,39 @@ WS broadcast JSON 필드:
 | `lat/lon` | FC | deg (1e-7 변환) |
 | `alt` | FC | m (mm 변환) |
 | `fix` | FC | GPS fix type |
+| `uplink_fb` | FC/SH | 0=OK 1=CRC_FAIL 2=SEQ_FAIL |
+| `link_state` | SH | lora_tdm_app 링크 상태 (지상 계산 아님, 기체 자체 판단) |
 | `health_state` | SH | 0=NOMINAL 1=DEGRADED 2=RECOVERY |
 | `fault_code` | SH | |
 | `heartbeat` | 서버 | 누적 수신 패킷 수 (FC+SH) |
-| `packet_loss` | 서버 | FC+SH 통합 seq gap 기반 손실률 (%) |
+| `packet_loss` | 서버 | FC+SH 통합 seq gap 기반 손실률 (%) — **known bug**, 아래 §"packet_loss per-source 분리" 참조 |
+
+## 링크 상태 갭 (2026-07-13)
+
+**증상**: 본 서버는 다운링크 수신만으로 `[OK]`/`heartbeat`/`packet_loss`를 계산해
+지상 화면에는 "정상"으로 보이지만, **지상→기체 `ACK,<seq>\n` 송신 코드가 없다.**
+
+기체(`lora_tdm_app`)는 이 ACK를 keepalive로 사용해 `LinkState`를 CONNECTED로 전이시킨다
+(`lora_tdm_app_behavior_spec.md` §11: `elapsed > LINK_TIMEOUT_MS(5000)` → DISCONNECTED).
+즉 **지상 화면과 기체 판단이 서로 다른 링크 상태를 볼 수 있다** — 지상 "OK", 기체 "DISCONNECTED".
+
+지금까지 실링크 시험은 사람이 수동으로 `ACK,<seq>\n`을 시리얼에 입력해 우회해왔다
+(`cfs-telemetry-app/tests/TEST_CASES.md:481`). 상시 운용에는 쓸 수 없는 임시방편.
+
+**해야 할 일**: `serial_reader()`가 다운링크 라인을 받으면(=파싱 성공 직후) 그 `seq`로
+`ACK,<seq>\n`을 즉시 회신하도록 추가. v2(DL2) 전환 시에는 ACK2(바이너리) 회신으로 대체.
+
+## 프로토콜 v2 (바이너리) — 계획, 미구현
+
+다운링크 실효 갱신율을 0.77Hz→5Hz로 올리는 바이너리 프레임 설계가 확정되었다
+(`cfs-telemetry-app/notes/lora_protocol_v2_spec.md`). 요지:
+
+- DL2(0xD2, 46B) 통합 프레임 — FC/SH 필드를 하나로 합쳐 현재의 "FC/SH 슬롯 경합" 자체가 소멸
+- UP2(0xB2) — hex 인코딩 폐지
+- ACK2(0xA2, 5B) — CRC 포함 ACK, magic 바이트로 v1과 공존
+- 본 서버의 `serial_reader()`는 `readline()` 기반(§코드) — v2는 종단문자가 없어 그대로는
+  못 받는다. `cfs-telemetry-app/bridge/lora_downlink_decoder.py`의 `DownlinkStream`
+  (바이트 스트림 상태머신, v1/v2 magic 분기)을 참고해 교체 필요.
 
 ### 업링크 HTTP (POST → LoRa TX)
 
