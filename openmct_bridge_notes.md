@@ -98,6 +98,13 @@ WS broadcast JSON 필드:
   못 받는다. `cfs-telemetry-app/bridge/lora_downlink_decoder.py`의 `DownlinkStream`
   (바이트 스트림 상태머신, v1/v2 magic 분기)을 참고해 교체 필요.
 
+**vendoring 상태(2026-07-13)**: 위 `DownlinkStream` 참조 구현을 본 리포에
+`lora_protocol_v2.py`로 로컬 복사해둔 상태(파일은 디스크에 존재). 아직 git
+커밋은 안 함 — auto-mode 권한 분류기가 "미승인 상태로 vendored 파일이
+default 브랜치 커밋에 들어감"으로 차단, 명시적 사용자 승인 필요. 위
+`readline()` → 상태머신 교체가 이 파일을 실제로 사용하기 시작하는 시점이므로
+그 작업과 묶어서 커밋 여부를 재검토한다.
+
 ### 업링크 HTTP (POST → LoRa TX)
 
 ```
