@@ -22,6 +22,9 @@ const FALLBACK_PARAMS = {
         'reconnect_interval_ms',
         'heartbeat_interval_ms',
     ],
+    lora_tdm: [
+        'downlink_protocol',
+    ],
 };
 
 const MAX_WAYPOINTS = 16;   // spec §18.4.6.2
@@ -304,6 +307,7 @@ export default function uplinkGUIPlugin(serverUrl = DEFAULT_SERVER) {
                                     <select data-el="scope">
                                         <option value="cfs_core">cfs_core</option>
                                         <option value="mavlink_bridge">mavlink_bridge</option>
+                                        <option value="lora_tdm">lora_tdm</option>
                                     </select>
                                 </div>
                                 <div class="ug-row">
