@@ -104,6 +104,10 @@ UPLINK_CLASS_CONFIG       = 1
 UPLINK_CLASS_ROUTE_UPDATE = 2
 UPLINK_CLASS_RECOVERY     = 4
 
+# mission_app_runtime_spec.md §18.10.2 — UP 프레임 flags 필드 비트0.
+# 벤치 테스트 전용: health gate(§18.10.1)를 이 명령 하나만 우회.
+UPLINK_FORCE_FLAG = 0x01
+
 SCOPE_CFS_CORE_APP   = 1
 SCOPE_MAVLINK_BRIDGE = 2
 SCOPE_LORA_TDM       = 3
@@ -356,18 +360,24 @@ class UplinkHandler(BaseHTTPRequestHandler):
             self._json({"error": "value must be uint32"}, HTTPStatus.BAD_REQUEST)
             return
 
+        # mission_app_runtime_spec.md §18.10.2 — UPLINK_APP_FORCE_FLAG(0x01).
+        # 벤치 테스트 전용: DEGRADED/FAILED에서도 이 명령 하나만 health gate 우회.
+        force = bool(body.get("force", False))
+        flags = UPLINK_FORCE_FLAG if force else 0
+
         seq = _seq_counter.next()
         try:
             payload = _build_config_payload(scope, params[param], value)
-            frame   = _build_lora_frame(seq, payload, UPLINK_CLASS_CONFIG)
+            frame   = _build_lora_frame(seq, payload, UPLINK_CLASS_CONFIG, flags)
             _queue_uplink(frame)
         except Exception as e:
             self._json({"error": str(e)}, HTTPStatus.INTERNAL_SERVER_ERROR)
             return
 
-        print(f"[UP] CONFIG seq={seq} {scope_name}.{param}={value}  queued  frame={frame}")
+        force_tag = " [FORCE]" if force else ""
+        print(f"[UP] CONFIG seq={seq} {scope_name}.{param}={value}{force_tag}  queued  frame={frame}")
         self._json({"ok": True, "seq": seq, "scope": scope_name, "param": param,
-                    "value": value, "transport": "lora", "queued": True})
+                    "value": value, "force": force, "transport": "lora", "queued": True})
 
     def _handle_route(self, body: dict):
         route_name = str(body.get("route_type", "")).lower()

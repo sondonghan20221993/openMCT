@@ -199,8 +199,9 @@ export default function uplinkGUIPlugin(serverUrl = DEFAULT_SERVER) {
                         log('[ERR] value must be a uint32 integer (0 – 4294967295)', 'ug-err');
                         return;
                     }
+                    const force = !!(els.force && els.force.checked);
                     try {
-                        const json = await postJSON('/api/uplink/config', { scope, param, value });
+                        const json = await postJSON('/api/uplink/config', { scope, param, value, force });
                         if (json.ok) {
                             log(`[OK] CONFIG accepted  seq=${json.seq}  ${json.scope}.${json.param}=${json.value}`, 'ug-ok');
                             const describe = () => `config ${scope}.${param}=${value}`;
@@ -318,6 +319,11 @@ export default function uplinkGUIPlugin(serverUrl = DEFAULT_SERVER) {
                                     <label>value</label>
                                     <input class="ug-num" type="number" min="0" max="4294967295" step="1" data-el="value" placeholder="0">
                                     <span class="hint">uint32 (0 – 4294967295)</span>
+                                </div>
+                                <div class="ug-row">
+                                    <label title="벤치 테스트 전용 — DEGRADED/FAILED에서도 이 명령 하나만 health gate 우회 (§18.10.2)">
+                                        <input type="checkbox" data-el="force"> ⚠️ force (bench-only, health gate 우회)
+                                    </label>
                                 </div>
                                 <div class="ug-row" style="justify-content:flex-end;margin-bottom:0;">
                                     <button class="ug-send" data-el="sendConfig" type="button">CONFIG 전송</button>
