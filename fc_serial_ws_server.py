@@ -106,6 +106,7 @@ UPLINK_CLASS_RECOVERY     = 4
 
 SCOPE_CFS_CORE_APP   = 1
 SCOPE_MAVLINK_BRIDGE = 2
+SCOPE_LORA_TDM       = 3
 
 # route update (spec §18.4.6.2) — 검증은 uplink_app이 권위 수행, 여기선 형식만 점검
 ROUTE_VERSION             = 1
@@ -136,6 +137,12 @@ MAVLINK_BRIDGE_PARAMS = {
     "ekf_status_interval_us":      4,
     "reconnect_interval_ms":       5,
     "heartbeat_interval_ms":       6,
+}
+
+# lora_protocol_v2_spec.md §8 — v1(text)/v2(DL2) 런타임 전환.
+# value: 0=v1, 1=v2. 기체측 대응: lora_tdm_app LORA_TDM_APP_PARAM_DOWNLINK_PROTOCOL.
+LORA_TDM_PARAMS = {
+    "downlink_protocol": 0,
 }
 
 
@@ -299,6 +306,7 @@ class UplinkHandler(BaseHTTPRequestHandler):
                 "scopes": {
                     "cfs_core": sorted(CFS_CORE_PARAMS),
                     "mavlink_bridge": sorted(MAVLINK_BRIDGE_PARAMS),
+                    "lora_tdm": sorted(LORA_TDM_PARAMS),
                 },
                 "transport": "lora",
             })
@@ -327,6 +335,8 @@ class UplinkHandler(BaseHTTPRequestHandler):
             scope, params = SCOPE_CFS_CORE_APP, CFS_CORE_PARAMS
         elif scope_name == "mavlink_bridge":
             scope, params = SCOPE_MAVLINK_BRIDGE, MAVLINK_BRIDGE_PARAMS
+        elif scope_name == "lora_tdm":
+            scope, params = SCOPE_LORA_TDM, LORA_TDM_PARAMS
         else:
             self._json({"error": f"unknown scope '{scope_name}'"}, HTTPStatus.BAD_REQUEST)
             return
