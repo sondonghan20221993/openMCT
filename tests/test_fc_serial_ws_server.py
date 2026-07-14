@@ -58,6 +58,16 @@ class Dl2FrameToDataTest(unittest.TestCase):
         self.assertEqual(srv._heartbeat, 2)
         self.assertEqual(srv._packet_loss, 0.0)
 
+    def test_sys_time_included_when_present(self):
+        frame = self._make_frame(sys_time_unix_usec=1752480000123456)
+        data = srv.dl2_frame_to_data(frame)
+        self.assertEqual(data["sys_time_unix_usec"], 1752480000123456)
+
+    def test_sys_time_absent_when_not_present(self):
+        frame = self._make_frame()  # sys_time_unix_usec 기본값 None
+        data = srv.dl2_frame_to_data(frame)
+        self.assertNotIn("sys_time_unix_usec", data)
+
     def test_csv_writer_accepts_dl2_row_without_extra_keys(self):
         """dl2_frame_to_data 결과가 _csv_fields에 없는 키를 안 담아야
         csv.DictWriter(extrasaction 기본값 'raise')가 안 터진다."""

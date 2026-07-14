@@ -57,6 +57,7 @@ _csv_fields = [
     'heartbeat', 'packet_loss',
     'uplink_fb', 'link_state',            # parse_lora_line이 채우지만 기존 목록에 누락돼 있었음
     '_ack_send_ms', '_rx_total_ms',       # Stage 1/2 실측용 (openmct_bridge_notes.md 참조)
+    'sys_time_unix_usec',                 # GPS 기반 UTC (DL2 전용, §16.4 — notes/temp/gps_time_sync_164_implementation.md)
 ]
 
 def _init_csv():
@@ -641,13 +642,13 @@ def dl2_frame_to_data(frame: Dl2Frame) -> dict:
     """DL2(v2 바이너리 통합 프레임) -> 기존 WS/CSV 스키마(v1 FC/SH와 동일 필드명).
 
     DL2는 자세/위치(구 FC)와 health/link(구 SH)를 한 프레임에 합쳐 보내므로
-    source="DL2" 단일 레코드로 변환한다. sys_time_unix_usec/pos_saturated는
-    현재 _csv_fields에 없어 이번 범위에서는 반영하지 않음(notes/temp/
-    dl2_downlink_integration.md 참조).
+    source="DL2" 단일 레코드로 변환한다. pos_saturated는 현재 _csv_fields에
+    없어 이번 범위에서는 반영하지 않음. sys_time_unix_usec(§16.4, GPS UTC —
+    notes/temp/gps_time_sync_164_implementation.md)는 있을 때만 채움.
     """
     ts = int(time.time() * 1000)
     _update_link(frame.seq)
-    return {
+    data = {
         "timestamp": ts, "source": "DL2",
         "seq": frame.seq, "boot_ms": frame.ts_ms,
         "roll": frame.roll_rad, "pitch": frame.pitch_rad, "yaw": frame.yaw_rad,
@@ -659,6 +660,9 @@ def dl2_frame_to_data(frame: Dl2Frame) -> dict:
         "uplink_fb": frame.ufb,
         "heartbeat": _heartbeat, "packet_loss": _packet_loss,
     }
+    if frame.sys_time_unix_usec is not None:
+        data["sys_time_unix_usec"] = frame.sys_time_unix_usec
+    return data
 
 # ---------------------------------------------------------------------------
 # WebSocket + serial async loop
