@@ -134,6 +134,18 @@ def _generate_request_token() -> int:
     token = random.getrandbits(32)
     return token if token != 0 else 1
 
+
+def _assemble_recovery_payload(payload_hex: str, request_token: int) -> bytes:
+    """RECOVERY 페이로드 조립: [0:4]=action/target/reason(입력 유지, 부족분 0패딩),
+    [4:8]=request_token(u32 LE, 입력 무시하고 항상 덮어씀).
+
+    uplink_app_utils.c::UPLINK_APP_ForwardRecoveryCommand 레이아웃과 일치해야 함.
+    """
+    payload = bytearray.fromhex(payload_hex) if payload_hex else bytearray()
+    if len(payload) < 4:
+        payload.extend(b"\x00" * (4 - len(payload)))
+    return bytes(payload[:4]) + struct.pack("<I", request_token)
+
 SCOPE_CFS_CORE_APP   = 1
 SCOPE_MAVLINK_BRIDGE = 2
 SCOPE_LORA_TDM       = 3
@@ -449,23 +461,17 @@ class UplinkHandler(BaseHTTPRequestHandler):
 
     def _handle_recovery(self, body: dict):
         payload_hex = body.get("payload_hex", "")
-        if payload_hex:
-            try:
-                payload = bytearray.fromhex(payload_hex)
-            except ValueError:
-                self._json({"error": "invalid payload_hex"}, HTTPStatus.BAD_REQUEST)
-                return
-        else:
-            payload = bytearray()
+        try:
+            bytearray.fromhex(payload_hex) if payload_hex else None
+        except ValueError:
+            self._json({"error": "invalid payload_hex"}, HTTPStatus.BAD_REQUEST)
+            return
 
-        # uplink_app_utils.c::ForwardRecoveryCommand — [0:4]=action/target/reason,
-        # [4:8]=RequestToken(u32 LE). §18.11.1 레벨3 게이트는 토큰 0을 항상 거부하므로
-        # 호출자가 직접 채우지 않아도 되게 서버가 매번 생성해 덮어쓴다.
+        # §18.11.1 레벨3 게이트는 토큰 0을 항상 거부하므로 호출자가 직접
+        # 채우지 않아도 되게 서버가 매번 생성해 덮어쓴다.
         # (notes/temp/recovery_request_token_missing.md A안)
-        if len(payload) < 4:
-            payload.extend(b"\x00" * (4 - len(payload)))
         request_token = _generate_request_token()
-        payload = bytes(payload[:4]) + struct.pack("<I", request_token)
+        payload = _assemble_recovery_payload(payload_hex, request_token)
 
         seq = _seq_counter.next()
         try:
