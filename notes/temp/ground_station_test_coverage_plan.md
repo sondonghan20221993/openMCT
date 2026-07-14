@@ -59,4 +59,45 @@
       assemble_recovery_payload/SeqCounter/parse_int·float/parse_lora_line
       (FC/SH 정상·부족필드·sats·rollspeed 경계값) 26개 케이스
 - [x] 로컬 실행 검증(`python3 -m unittest discover -s tests`) — 26/26 PASS
+- [x] 커밋 + push (`1b2d2f2`)
+
+## 2차 범위 — UplinkHandler HTTP 통합테스트 (2026-07-14 착수)
+
+1차에서 "필요시 2차로" 미뤄뒀던 `UplinkHandler`(`BaseHTTPRequestHandler`) 자체를
+지금 진행한다.
+
+### 이유
+
+순수 함수(CRC/페이로드/플래그/토큰)는 1차에서 커버됐지만, HTTP 요청→JSON
+파싱→검증→라우팅→응답까지 이어지는 엔드투엔드 경로는 여전히 미검증:
+- 잘못된 JSON body → 400 응답
+- 필수 필드 누락(`scope`/`param`/`route_type`/`waypoints`) → 400 + 에러 메시지
+- 정상 요청 → 200 + `queued=true` + `_pending_uplink`에 실제로 적재되는지
+- `force` 플래그, `waypoints` 개수 제한(`MAX_ROUTE_WAYPOINTS`), CORS/OPTIONS
+
+### 결정
+
+`ThreadingHTTPServer`를 임의 포트(`0`)로 실제 기동해 `http.client`로 실제 HTTP
+요청을 보내는 통합테스트로 작성 (`unittest`, 기존 `tests/` 디렉터리에 파일 추가:
+`tests/test_uplink_handler_integration.py`). 서버는 각 테스트 클래스
+`setUpClass`/`tearDownClass`에서 기동/종료. `_seq_counter`/`_pending_uplink`
+등 모듈 전역 상태는 `setUp`에서 초기화해 테스트 간 격리.
+
+### 범위
+
+- CONFIG: 정상 200, 알 수 없는 scope/param 400, value 비정수 400, uint32
+  범위초과 400, force 플래그 반영
+- ROUTE: 정상 200, 알 수 없는 route_type 400, waypoints 개수 초과/미만 400,
+  waypoint 형식 오류 400
+- RECOVERY: 정상 200 + `request_token` 응답 필드 존재, invalid payload_hex 400
+- 공통: `/health` 200, `/api/uplink/meta` 200 스코프 목록, 알 수 없는 경로 404,
+  잘못된 JSON body 400, OPTIONS 프리플라이트 204 + CORS 헤더
+
+### 상태
+
+- [x] 범위 결정 (본 섹션)
+- [x] `tests/test_uplink_handler_integration.py` 작성 — CONFIG/ROUTE/RECOVERY
+      정상·오류 케이스 + 공통(health/meta/404/잘못된 JSON/OPTIONS) 20개 케이스
+- [x] 로컬 실행 검증 — 단독 20/20 PASS, 전체 스위트(1차 26 + 2차 20) 46/46 PASS,
+      상호 간섭 없음 확인
 - [ ] 커밋 + push
