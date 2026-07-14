@@ -6,6 +6,71 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import fc_serial_ws_server as srv
+from lora_protocol_v2 import Dl2Frame, DL2_BASE_LEN
+
+
+class Dl2FrameToDataTest(unittest.TestCase):
+    def _make_frame(self, **overrides):
+        base = dict(
+            seq=42, flags=0, ufb=0, ts_ms=12345,
+            roll_rad=0.1, pitch_rad=-0.2, yaw_rad=0.3,
+            x_m=1.0, y_m=-2.0, z_m=3.0,
+            vx_mps=0.5, vy_mps=-0.5, vz_mps=0.0,
+            lat_e7=374530000, lon_e7=1269850000, alt_mm=50000,
+            fix=3, sats=9, health=1, fault=0, linkstate=1,
+        )
+        base.update(overrides)
+        return Dl2Frame(**base)
+
+    def setUp(self):
+        srv._heartbeat = 0
+        srv._last_seq = None
+        srv._total_expected = 0
+        srv._total_received = 0
+        srv._packet_loss = 0.0
+
+    def test_field_mapping_and_scaling(self):
+        frame = self._make_frame()
+        data = srv.dl2_frame_to_data(frame)
+
+        self.assertEqual(data["source"], "DL2")
+        self.assertEqual(data["seq"], 42)
+        self.assertEqual(data["boot_ms"], 12345)
+        self.assertEqual(data["roll"], 0.1)
+        self.assertEqual(data["pitch"], -0.2)
+        self.assertEqual(data["yaw"], 0.3)
+        self.assertEqual(data["x"], 1.0)
+        self.assertEqual(data["y"], -2.0)
+        self.assertEqual(data["z"], 3.0)
+        self.assertAlmostEqual(data["lat"], 37.453)
+        self.assertAlmostEqual(data["lon"], 126.985)
+        self.assertAlmostEqual(data["alt"], 50.0)
+        self.assertEqual(data["fix"], 3)
+        self.assertEqual(data["sats"], 9)
+        self.assertEqual(data["health_state"], 1)
+        self.assertEqual(data["fault_code"], 0)
+        self.assertEqual(data["link_state"], 1)
+        self.assertEqual(data["uplink_fb"], 0)
+
+    def test_updates_link_quality_seq_tracking(self):
+        srv.dl2_frame_to_data(self._make_frame(seq=1))
+        srv.dl2_frame_to_data(self._make_frame(seq=2))
+        self.assertEqual(srv._heartbeat, 2)
+        self.assertEqual(srv._packet_loss, 0.0)
+
+    def test_csv_writer_accepts_dl2_row_without_extra_keys(self):
+        """dl2_frame_to_data 결과가 _csv_fields에 없는 키를 안 담아야
+        csv.DictWriter(extrasaction 기본값 'raise')가 안 터진다."""
+        data = srv.dl2_frame_to_data(self._make_frame())
+        extra = set(data.keys()) - set(srv._csv_fields)
+        self.assertEqual(extra, set(), f"_csv_fields에 없는 키: {extra}")
+
+
+class LoraProtocolV2SyncTest(unittest.TestCase):
+    def test_dl2_base_len_includes_sats_field(self):
+        """lora_protocol_v2.py가 cfs-telemetry-app/bridge/lora_downlink_decoder.py
+        최신본(45바이트, sats 포함)과 동기화된 상태인지 회귀 확인."""
+        self.assertEqual(DL2_BASE_LEN, 45)
 
 
 class Crc16Test(unittest.TestCase):

@@ -21,6 +21,8 @@ import serial
 from serial.tools import list_ports
 import websockets
 
+from lora_protocol_v2 import DownlinkStream, Dl2Frame, V1Line, DecodeError, build_ack2
+
 # ---------------------------------------------------------------------------
 # WebSocket state
 # ---------------------------------------------------------------------------
@@ -289,10 +291,21 @@ def autodetect_serial_port(with_retry: bool = False, retry_interval: int = 5) ->
         time.sleep(retry_interval)
 
 
-def _lora_send(frame: str) -> None:
+def _lora_send_bytes(data: bytes) -> None:
     with _serial_write_lock:
-        _ser.write((frame + "\n").encode("ascii"))
+        _ser.write(data)
         _ser.flush()
+
+
+def _lora_send(frame: str) -> None:
+    _lora_send_bytes((frame + "\n").encode("ascii"))
+
+
+def _lora_send_ack2(seq_echo: int) -> None:
+    """DL2(v2) 프레임 수신 ACK — 바이너리 ACK2, 개행 없음(길이기반 프레이밍)."""
+    if seq_echo is None:
+        return
+    _lora_send_bytes(build_ack2(seq_echo))
 
 
 # ---------------------------------------------------------------------------
@@ -623,6 +636,30 @@ def parse_lora_line(line: str):
 
     return None
 
+
+def dl2_frame_to_data(frame: Dl2Frame) -> dict:
+    """DL2(v2 바이너리 통합 프레임) -> 기존 WS/CSV 스키마(v1 FC/SH와 동일 필드명).
+
+    DL2는 자세/위치(구 FC)와 health/link(구 SH)를 한 프레임에 합쳐 보내므로
+    source="DL2" 단일 레코드로 변환한다. sys_time_unix_usec/pos_saturated는
+    현재 _csv_fields에 없어 이번 범위에서는 반영하지 않음(notes/temp/
+    dl2_downlink_integration.md 참조).
+    """
+    ts = int(time.time() * 1000)
+    _update_link(frame.seq)
+    return {
+        "timestamp": ts, "source": "DL2",
+        "seq": frame.seq, "boot_ms": frame.ts_ms,
+        "roll": frame.roll_rad, "pitch": frame.pitch_rad, "yaw": frame.yaw_rad,
+        "x": frame.x_m, "y": frame.y_m, "z": frame.z_m,
+        "vx": frame.vx_mps, "vy": frame.vy_mps, "vz": frame.vz_mps,
+        "lat": frame.lat_e7 / 1e7, "lon": frame.lon_e7 / 1e7, "alt": frame.alt_mm / 1000.0,
+        "fix": frame.fix, "sats": frame.sats,
+        "health_state": frame.health, "fault_code": frame.fault, "link_state": frame.linkstate,
+        "uplink_fb": frame.ufb,
+        "heartbeat": _heartbeat, "packet_loss": _packet_loss,
+    }
+
 # ---------------------------------------------------------------------------
 # WebSocket + serial async loop
 # ---------------------------------------------------------------------------
@@ -662,39 +699,57 @@ def _send_ack(seq) -> None:
     _lora_send(f"ACK,{seq}")
 
 
+_downlink_stream = DownlinkStream()
+
+
 async def serial_reader():
     while True:
         rx_start = time.monotonic()
-        raw = await asyncio.to_thread(_ser.readline)
-        if not raw:
+        # v1(줄단위)/v2(DL2, 길이기반 바이너리)가 혼용될 수 있어 readline()이 아니라
+        # 원시 청크를 읽어 DownlinkStream에 먹인다 — readline()은 DL2 바이트 안에
+        # 우연히 0x0A가 섞이면 프레임을 중간에 끊어버릴 위험이 있어 쓸 수 없다.
+        chunk = await asyncio.to_thread(_ser.read, 256)
+        if not chunk:
             await asyncio.sleep(0.01)
             continue
-        line = raw.decode(errors="ignore").strip()
-        # downlink 라인 수신 = Pi가 방금 TX함 = RX 윈도우(300ms)가 지금 열림.
-        # ACK를 먼저 보내 keepalive를 확보한 뒤, 남는 시간에 pending uplink를 flush한다.
-        # (같은 슬롯에서 ACK/UP이 경합하면 링크 keepalive가 더 중요 — 우선순위 고정)
-        data = parse_lora_line(line)
-        if data is None:
-            print("[BAD]", line)
+
+        events = _downlink_stream.feed(chunk)
+
+        for event in events:
+            if isinstance(event, DecodeError):
+                print("[BAD]", event.reason)
+                continue
+
+            if isinstance(event, Dl2Frame):
+                data = dl2_frame_to_data(event)
+                ack_start = time.monotonic()
+                _lora_send_ack2(event.seq)
+            elif isinstance(event, V1Line):
+                data = parse_lora_line(event.text)
+                if data is None:
+                    print("[BAD]", event.text)
+                    continue
+                ack_start = time.monotonic()
+                _send_ack(data.get("seq"))
+            else:
+                continue
+
+            # downlink 수신 = Pi가 방금 TX함 = RX 윈도우가 지금 열림.
+            # ACK를 먼저 보내 keepalive를 확보한 뒤, 남는 시간에 pending uplink를 flush한다.
+            ack_elapsed_ms = (time.monotonic() - ack_start) * 1000.0
+
             _flush_pending_uplink()
-            continue
 
-        ack_start = time.monotonic()
-        _send_ack(data.get("seq"))
-        ack_elapsed_ms = (time.monotonic() - ack_start) * 1000.0
+            msg = json.dumps(data)
+            rx_elapsed_ms = (time.monotonic() - rx_start) * 1000.0
+            print(f"[OK] {msg}  (ack_send={ack_elapsed_ms:.1f}ms total={rx_elapsed_ms:.1f}ms)")
 
-        _flush_pending_uplink()
+            # CSV에 저장 (계측값 포함 — Stage 1/2 실측 런북 참조)
+            data["_ack_send_ms"] = round(ack_elapsed_ms, 2)
+            data["_rx_total_ms"] = round(rx_elapsed_ms, 2)
+            _save_telemetry_to_csv(data)
 
-        msg = json.dumps(data)
-        rx_elapsed_ms = (time.monotonic() - rx_start) * 1000.0
-        print(f"[OK] {msg}  (ack_send={ack_elapsed_ms:.1f}ms total={rx_elapsed_ms:.1f}ms)")
-
-        # CSV에 저장 (계측값 포함 — Stage 1/2 실측 런북 참조)
-        data["_ack_send_ms"] = round(ack_elapsed_ms, 2)
-        data["_rx_total_ms"] = round(rx_elapsed_ms, 2)
-        _save_telemetry_to_csv(data)
-
-        await broadcast(msg)
+            await broadcast(msg)
 
 
 async def main_async(serial_port: str, baudrate: int, http_port: int, enable_lora_retry: bool = True):
