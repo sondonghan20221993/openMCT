@@ -25,18 +25,32 @@
 - 즉 RECOVERY 명령은 현재 UI 경로로는 사실상 쓸 수 없는 상태 —
   API를 직접 호출해서 8바이트 이상 payload_hex를 수동 조립해야만 동작.
 
-## 결정
+## 결정 (2026-07-14)
 
-미정 — 기록만 해두고 해결 방식은 추후 결정.
+**A안 채택** — 서버가 매 RECOVERY 요청마다 0이 아닌 토큰을 자동 생성해
+`Payload[4:8]`에 채워 넣는다. 호출자(GUI/API)는 action/target/reason(첫 4바이트)만
+입력하면 되고, token은 신경 쓸 필요 없음 — 즉시 사용 가능하게 만드는 게 목적이므로
+수동 입력 필드(B)는 불필요한 마찰. C는 지금 시점에 과설계.
 
-후보:
-- A: 서버가 매 RECOVERY 요청마다 랜덤/타임스탬프 기반 0이 아닌 토큰을
-  자동 생성해 `Payload[4:8]`에 채워 넣음 (호출자는 action/target/reason만 입력)
-- B: GUI에 request_token 입력 필드 추가, 서버는 그대로 전달만
-- C: 둘 다 지원(자동 생성 기본값 + 수동 override 옵션)
+### 구현 범위
+
+`fc_serial_ws_server.py::_handle_recovery()`:
+- `payload_hex`로 들어온 앞 4바이트(action/target/reason)는 그대로 유지 —
+  4바이트 미만이면 0으로 패딩.
+- 뒤 4바이트(`[4:8]`, RequestToken)는 클라이언트 입력을 무시하고 서버가
+  `random.getrandbits(32)`(0이면 1로 대체)로 생성해 덮어씀.
+- 응답 JSON에 `request_token`을 포함해 로그/디버깅에서 확인 가능하게 함.
+
+페이로드 레이아웃 근거(`uplink_app_utils.c::UPLINK_APP_ForwardRecoveryCommand`,
+`uplink_app/config/default_uplink_app_msgstruct.h` `UPLINK_APP_RecoveryCmdTlm_t`):
+`[0]`=RecoveryAction, `[1]`=TargetComponent, `[2:4]`=ReasonCode(u16 LE),
+`[4:8]`=RequestToken(u32 LE). `PayloadLength < 8`이면 필드가 0으로 남는다
+(§18.11.1 레벨3 게이트에서 토큰 0은 항상 거부).
 
 ## 상태
 
-- [ ] 해결 방식 결정 (A/B/C)
-- [ ] 구현
-- [ ] 검증
+- [x] 해결 방식 결정 (A안)
+- [x] 구현 — `fc_serial_ws_server.py::_handle_recovery()`, `_generate_request_token()` 추가
+- [x] 검증 — 모듈 로드 후 토큰 생성/페이로드 조립/프레임 빌드 수동 확인
+      (payload=`01020300059A1483`, flags=`0xC0`, token 0이 아님 확인). 실기체 왕복
+      테스트는 Pi 배포 후 별도.

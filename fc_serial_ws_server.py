@@ -9,6 +9,7 @@ import asyncio
 import csv
 import json
 import os
+import random
 import struct
 import threading
 import time
@@ -122,6 +123,16 @@ UPLINK_CLASS_REQUIRED_LEVEL = {
 def _auth_level_flag_bits(command_class: int) -> int:
     level = UPLINK_CLASS_REQUIRED_LEVEL.get(command_class, 0)
     return (level & 0x3) << 6
+
+
+def _generate_request_token() -> int:
+    """RECOVERY(level3) 인증에 필요한 0이 아닌 request_token 자동 생성.
+
+    notes/temp/recovery_request_token_missing.md 참조 — 호출자가 직접
+    Payload[4:8]을 채우지 않아도 되도록 서버가 매번 생성한다.
+    """
+    token = random.getrandbits(32)
+    return token if token != 0 else 1
 
 SCOPE_CFS_CORE_APP   = 1
 SCOPE_MAVLINK_BRIDGE = 2
@@ -440,12 +451,21 @@ class UplinkHandler(BaseHTTPRequestHandler):
         payload_hex = body.get("payload_hex", "")
         if payload_hex:
             try:
-                payload = bytes.fromhex(payload_hex)
+                payload = bytearray.fromhex(payload_hex)
             except ValueError:
                 self._json({"error": "invalid payload_hex"}, HTTPStatus.BAD_REQUEST)
                 return
         else:
-            payload = b""
+            payload = bytearray()
+
+        # uplink_app_utils.c::ForwardRecoveryCommand — [0:4]=action/target/reason,
+        # [4:8]=RequestToken(u32 LE). §18.11.1 레벨3 게이트는 토큰 0을 항상 거부하므로
+        # 호출자가 직접 채우지 않아도 되게 서버가 매번 생성해 덮어쓴다.
+        # (notes/temp/recovery_request_token_missing.md A안)
+        if len(payload) < 4:
+            payload.extend(b"\x00" * (4 - len(payload)))
+        request_token = _generate_request_token()
+        payload = bytes(payload[:4]) + struct.pack("<I", request_token)
 
         seq = _seq_counter.next()
         try:
@@ -456,8 +476,9 @@ class UplinkHandler(BaseHTTPRequestHandler):
             self._json({"error": str(e)}, HTTPStatus.INTERNAL_SERVER_ERROR)
             return
 
-        print(f"[UP] RECOVERY seq={seq}  queued  frame={frame}")
-        self._json({"ok": True, "seq": seq, "transport": "lora", "queued": True})
+        print(f"[UP] RECOVERY seq={seq} token={request_token:#010x}  queued  frame={frame}")
+        self._json({"ok": True, "seq": seq, "request_token": request_token,
+                    "transport": "lora", "queued": True})
 
     def _read_body(self) -> dict | None:
         length = int(self.headers.get("Content-Length", 0))
