@@ -108,6 +108,21 @@ UPLINK_CLASS_RECOVERY     = 4
 # 벤치 테스트 전용: health gate(§18.10.1)를 이 명령 하나만 우회.
 UPLINK_FORCE_FLAG = 0x01
 
+# §18.11.1 권한 검증 — flags 필드 비트[7:6]에 실리는 인증 레벨(0~3).
+# 지상은 지금까지 이 비트를 전혀 안 채우고 있었음(발견: 2026-07-13) — CONFIG류
+# 명령이 실제로는 한 번도 권한검증을 통과한 적이 없었을 가능성. 클래스별 필요
+# 레벨은 uplink_app_cmds.c UPLINK_APP_GetClassRequiredLevel과 반드시 맞춰야 한다.
+UPLINK_CLASS_REQUIRED_LEVEL = {
+    UPLINK_CLASS_CONFIG: 2,
+    UPLINK_CLASS_ROUTE_UPDATE: 2,
+    UPLINK_CLASS_RECOVERY: 3,
+}
+
+
+def _auth_level_flag_bits(command_class: int) -> int:
+    level = UPLINK_CLASS_REQUIRED_LEVEL.get(command_class, 0)
+    return (level & 0x3) << 6
+
 SCOPE_CFS_CORE_APP   = 1
 SCOPE_MAVLINK_BRIDGE = 2
 SCOPE_LORA_TDM       = 3
@@ -363,7 +378,10 @@ class UplinkHandler(BaseHTTPRequestHandler):
         # mission_app_runtime_spec.md §18.10.2 — UPLINK_APP_FORCE_FLAG(0x01).
         # 벤치 테스트 전용: DEGRADED/FAILED에서도 이 명령 하나만 health gate 우회.
         force = bool(body.get("force", False))
-        flags = UPLINK_FORCE_FLAG if force else 0
+        # §18.10.3 — 비트[7:6]은 자격증명이 아니라 명령 클래스의 등급 분류 코드
+        # (§18.11.1, 기체측 GetClassRequiredLevel과 동일 값). 지상이 지금까지 이걸
+        # 안 채워서 CONFIG류가 항상 등급 불일치로 막혔음 — 클래스에 맞는 값으로 채운다.
+        flags = _auth_level_flag_bits(UPLINK_CLASS_CONFIG) | (UPLINK_FORCE_FLAG if force else 0)
 
         seq = _seq_counter.next()
         try:
@@ -407,7 +425,8 @@ class UplinkHandler(BaseHTTPRequestHandler):
         seq = _seq_counter.next()
         try:
             payload = _build_route_payload(route_type, ROUTE_VERSION, waypoints)
-            frame   = _build_lora_frame(seq, payload, UPLINK_CLASS_ROUTE_UPDATE)
+            flags   = _auth_level_flag_bits(UPLINK_CLASS_ROUTE_UPDATE)
+            frame   = _build_lora_frame(seq, payload, UPLINK_CLASS_ROUTE_UPDATE, flags)
             _queue_uplink(frame)
         except Exception as e:
             self._json({"error": str(e)}, HTTPStatus.INTERNAL_SERVER_ERROR)
@@ -430,7 +449,8 @@ class UplinkHandler(BaseHTTPRequestHandler):
 
         seq = _seq_counter.next()
         try:
-            frame = _build_lora_frame(seq, payload, UPLINK_CLASS_RECOVERY)
+            flags = _auth_level_flag_bits(UPLINK_CLASS_RECOVERY)
+            frame = _build_lora_frame(seq, payload, UPLINK_CLASS_RECOVERY, flags)
             _queue_uplink(frame)
         except Exception as e:
             self._json({"error": str(e)}, HTTPStatus.INTERNAL_SERVER_ERROR)

@@ -119,6 +119,27 @@ LoRa ASCII 업링크 프레임 포맷:
 UP,<version>,<class>,<seq>,<flags>,<payload_hex>,<crc16_hex>
 ```
 
+### §18.11.1 인증레벨 flags 비트[7:6] (2026-07-14 완결)
+
+`flags` 필드 비트[7:6]에는 명령 클래스별 요구 인증레벨(0~3)이 실려야 한다
+(기체측 `uplink_app_cmds.c::GetClassRequiredLevel`과 반드시 동일 값 —
+CONFIG=2, ROUTE_UPDATE=2, RECOVERY=3, VIEWPOINT=2, MODE=3, DIAGNOSTIC=1, NOOP=1).
+지상이 이 비트를 안 채우면 `IsAuthorized()`가 항상 거부(`auth_level=0 < required_level`).
+
+- **2026-07-13 발견**: 지상이 이 비트를 전혀 안 채우고 있었음 — CONFIG류 명령이
+  실제로는 한 번도 권한검증을 통과한 적이 없었을 가능성.
+- **1차 수정(미완결 상태로 있었음)**: `_auth_level_flag_bits()` 헬퍼는 추가됐으나
+  `_handle_config`에서만 사용, `_handle_route`/`_handle_recovery`는 여전히
+  `flags` 인자 없이 `_build_lora_frame()` 호출 → ROUTE_UPDATE/RECOVERY는
+  여전히 flags=0으로 나가 항상 거부되는 상태로 방치돼 있었음 (2026-07-14 발견).
+- **2026-07-14 완결**: `_handle_route`/`_handle_recovery`에도 동일 헬퍼 적용.
+- RECOVERY(요구레벨 3)는 인증레벨 비트 외에 `request_token`(payload 바이트
+  `[4:8]`, 리틀엔디언 uint32, 0이 아닌 값)도 필요 — 기체측
+  `ForwardRecoveryCommand`가 `Payload[0]=RecoveryAction`,`[1]=TargetComponent`,
+  `[2:4]=ReasonCode`,`[4:8]=RequestToken`으로 파싱. `_handle_recovery`는
+  `payload_hex`를 호출자가 그대로 넘기는 구조라 토큰 자동 생성은 없음 —
+  호출자가 8바이트 이상의 `payload_hex`를 직접 구성해야 함 (이번 수정 범위 밖).
+
 ## Open MCT 앱 (my_openmct_app)
 
 ```
