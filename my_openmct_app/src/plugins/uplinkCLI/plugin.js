@@ -26,7 +26,7 @@ const HELP = {
         'Commands:',
         '  config <scope> <param> <value>      Send CONFIG command to uplink_app',
         '  route <mission|landing> x,y,z ...   Send ROUTE_UPDATE command to uplink_app',
-        '  recovery [payload_hex]              Send RECOVERY command (payload currently ignored by uplink_app)',
+        '  recovery [payload_hex]              Send RECOVERY command (action byte drives cfs_core_app restart, see help recovery)',
         '  uplinktest                          Check uplink server health and available params',
         '  help [config|route|recovery]        Show detailed help',
         '  clear                               Clear terminal',
@@ -64,13 +64,16 @@ const HELP = {
 
     recovery: [
         'recovery [payload_hex]',
-        '  payload_hex : optional raw bytes in hex (future use)',
+        '  payload_hex : optional raw bytes in hex — byte[0]=action, byte[1]=target, byte[2]=reason',
         '',
-        '  uplink_app currently forwards RECOVERY to cfs_core via RECOVERY_CMD_MID (0x190C).',
-        '  The payload field is reserved for future action codes and is currently ignored.',
+        '  uplink_app forwards RECOVERY to cfs_core via RECOVERY_CMD_MID (0x190C);',
+        '  cfs_core_app now acts on byte[0] (action): 0=RESET_COUNTER, 1=RESTART_BRIDGE,',
+        '  2=PARSER_RESET(로그만, 실배선 없음), 3=SERIAL_RECONNECT(로그만, 실배선 없음),',
+        '  4=RESTART_UPLINK, 5=RESTART_LORA (2026-07-21, BL-09). byte[1]/byte[2]는 여전히',
+        '  로그 기록용으로만 쓰이고 동작에 영향 없음.',
         '',
         '  Example: recovery',
-        '  Example: recovery 0102AB  (raw override)',
+        '  Example: recovery 01  (RESTART_BRIDGE)',
     ].join('\n'),
 };
 
