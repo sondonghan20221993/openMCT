@@ -190,6 +190,32 @@ LORA_TDM_PARAMS = {
     "downlink_protocol": 0,
 }
 
+# 항목별 값 제한 — cFS 기체측 코드와 반드시 동기화 유지.
+# cfs_core_app: default_cfs_core_app_internal_cfg_values.h (PARAM_MIN_MS/MAX_MS)
+# mavlink_bridge_app: default_mavlink_bridge_app_internal_cfg_values.h
+#   (PARAM_INTERVAL_MIN_US/MAX_US, PARAM_MS_MIN/MAX)
+# lora_tdm_app: 기체측 코드는 !=0 을 1로 clamp할 뿐 범위 검증이 없으나,
+#   0/1 외 값을 보내는 것은 의도가 불분명하므로 지상에서 0/1로 제한한다.
+_CFS_CORE_MS_BOUNDS       = (100, 60000)
+_MAVLINK_BRIDGE_US_BOUNDS = (10000, 10000000)
+_MAVLINK_BRIDGE_MS_BOUNDS = (100, 60000)
+
+PARAM_BOUNDS = {
+    "cfs_core": {p: _CFS_CORE_MS_BOUNDS for p in CFS_CORE_PARAMS},
+    "mavlink_bridge": {
+        "attitude_interval_us":        _MAVLINK_BRIDGE_US_BOUNDS,
+        "local_position_interval_us":  _MAVLINK_BRIDGE_US_BOUNDS,
+        "global_position_interval_us": _MAVLINK_BRIDGE_US_BOUNDS,
+        "gps_raw_interval_us":         _MAVLINK_BRIDGE_US_BOUNDS,
+        "ekf_status_interval_us":      _MAVLINK_BRIDGE_US_BOUNDS,
+        "reconnect_interval_ms":       _MAVLINK_BRIDGE_MS_BOUNDS,
+        "heartbeat_interval_ms":       _MAVLINK_BRIDGE_MS_BOUNDS,
+    },
+    "lora_tdm": {
+        "downlink_protocol": (0, 1),
+    },
+}
+
 
 class _SeqCounter:
     def __init__(self):
@@ -364,6 +390,7 @@ class UplinkHandler(BaseHTTPRequestHandler):
                     "mavlink_bridge": sorted(MAVLINK_BRIDGE_PARAMS),
                     "lora_tdm": sorted(LORA_TDM_PARAMS),
                 },
+                "bounds": PARAM_BOUNDS,
                 "transport": "lora",
             })
         else:
@@ -410,6 +437,13 @@ class UplinkHandler(BaseHTTPRequestHandler):
 
         if not (0 <= value <= 0xFFFFFFFF):
             self._json({"error": "value must be uint32"}, HTTPStatus.BAD_REQUEST)
+            return
+
+        lo, hi = PARAM_BOUNDS[scope_name][param]
+        if not (lo <= value <= hi):
+            self._json({"error": f"value out of range for '{param}': "
+                                  f"must be between {lo} and {hi}",
+                        "min": lo, "max": hi}, HTTPStatus.BAD_REQUEST)
             return
 
         # mission_app_runtime_spec.md §18.10.2 — UPLINK_APP_FORCE_FLAG(0x01).

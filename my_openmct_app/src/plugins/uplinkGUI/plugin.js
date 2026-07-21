@@ -27,6 +27,31 @@ const FALLBACK_PARAMS = {
     ],
 };
 
+// 서버 /api/uplink/meta의 bounds 조회 실패 시 폴백 (fc_serial_ws_server.py의
+// PARAM_BOUNDS와 동일 — cFS 기체측 min/max 값 기준)
+const FALLBACK_BOUNDS = {
+    cfs_core: {
+        attitude_timeout_ms: [100, 60000],
+        local_timeout_ms:    [100, 60000],
+        gps_timeout_ms:      [100, 60000],
+        ekf_timeout_ms:      [100, 60000],
+        bridge_timeout_ms:   [100, 60000],
+        publish_period_ms:   [100, 60000],
+    },
+    mavlink_bridge: {
+        attitude_interval_us:        [10000, 10000000],
+        local_position_interval_us:  [10000, 10000000],
+        global_position_interval_us: [10000, 10000000],
+        gps_raw_interval_us:         [10000, 10000000],
+        ekf_status_interval_us:      [10000, 10000000],
+        reconnect_interval_ms:       [100, 60000],
+        heartbeat_interval_ms:       [100, 60000],
+    },
+    lora_tdm: {
+        downlink_protocol: [0, 1],
+    },
+};
+
 const MAX_WAYPOINTS = 16;   // spec §18.4.6.2
 
 export default function uplinkGUIPlugin(serverUrl = DEFAULT_SERVER) {
@@ -49,6 +74,8 @@ export default function uplinkGUIPlugin(serverUrl = DEFAULT_SERVER) {
             view() {
                 // scope별 param 목록 (meta 조회로 갱신, 실패 시 폴백)
                 let params = { ...FALLBACK_PARAMS };
+                // scope.param -> [min, max] (meta 조회로 갱신, 실패 시 폴백)
+                let bounds = { ...FALLBACK_BOUNDS };
                 let logEl = null;
                 let els = {};   // 폼 요소 참조
 
@@ -162,6 +189,7 @@ export default function uplinkGUIPlugin(serverUrl = DEFAULT_SERVER) {
                         if (!els.dot) return;
                         if (meta.scopes) {
                             params = meta.scopes;
+                            if (meta.bounds) bounds = meta.bounds;
                             rebuildParamOptions();
                         }
                         els.dot.className = 'ug-dot ok';
@@ -172,6 +200,7 @@ export default function uplinkGUIPlugin(serverUrl = DEFAULT_SERVER) {
                         els.dot.className = 'ug-dot err';
                         els.statusText.textContent = `서버 응답 없음 (${serverUrl}) — 폴백 param 사용`;
                         params = { ...FALLBACK_PARAMS };
+                        bounds = { ...FALLBACK_BOUNDS };
                         rebuildParamOptions();
                     }
                 }
@@ -186,6 +215,27 @@ export default function uplinkGUIPlugin(serverUrl = DEFAULT_SERVER) {
                         opt.textContent = p;
                         els.param.appendChild(opt);
                     });
+                    updateValueBounds();
+                }
+
+                // 선택된 scope.param의 min/max를 value input에 반영 (항목별 제한 상이)
+                function updateValueBounds() {
+                    if (!els.scope || !els.param || !els.value) return;
+                    const scope = els.scope.value;
+                    const param = els.param.value;
+                    const range = bounds[scope] && bounds[scope][param];
+                    if (range) {
+                        const [lo, hi] = range;
+                        els.value.min = String(lo);
+                        els.value.max = String(hi);
+                        els.value.placeholder = `${lo} – ${hi}`;
+                        if (els.valueHint) els.valueHint.textContent = `허용 범위: ${lo} – ${hi}`;
+                    } else {
+                        els.value.min = '0';
+                        els.value.max = '4294967295';
+                        els.value.placeholder = '0';
+                        if (els.valueHint) els.valueHint.textContent = '';
+                    }
                 }
 
                 // --- CONFIG 전송 ---
@@ -197,6 +247,11 @@ export default function uplinkGUIPlugin(serverUrl = DEFAULT_SERVER) {
                     const value = Number(els.value.value);
                     if (!Number.isInteger(value) || value < 0 || value > 0xFFFFFFFF) {
                         log('[ERR] value must be a uint32 integer (0 – 4294967295)', 'ug-err');
+                        return;
+                    }
+                    const range = bounds[scope] && bounds[scope][param];
+                    if (range && (value < range[0] || value > range[1])) {
+                        log(`[ERR] ${param}은(는) ${range[0]} – ${range[1]} 범위여야 합니다`, 'ug-err');
                         return;
                     }
                     const force = !!(els.force && els.force.checked);
@@ -318,7 +373,7 @@ export default function uplinkGUIPlugin(serverUrl = DEFAULT_SERVER) {
                                 <div class="ug-row">
                                     <label>value</label>
                                     <input class="ug-num" type="number" min="0" max="4294967295" step="1" data-el="value" placeholder="0">
-                                    <span class="hint">uint32 (0 – 4294967295)</span>
+                                    <span class="hint" data-el="valueHint">uint32 (0 – 4294967295)</span>
                                 </div>
                                 <div class="ug-row">
                                     <label title="벤치 테스트 전용 — DEGRADED/FAILED에서도 이 명령 하나만 health gate 우회 (§18.10.2)">
@@ -365,6 +420,7 @@ export default function uplinkGUIPlugin(serverUrl = DEFAULT_SERVER) {
                         // 이벤트 연결
                         els.refresh.addEventListener('click', refreshStatus);
                         els.scope.addEventListener('change', rebuildParamOptions);
+                        els.param.addEventListener('change', updateValueBounds);
                         els.sendConfig.addEventListener('click', sendConfig);
                         els.addWp.addEventListener('click', () => addWaypointRow());
                         els.sendRoute.addEventListener('click', sendRoute);
