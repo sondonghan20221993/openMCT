@@ -1,4 +1,5 @@
 import os
+import re
 import struct
 import sys
 import unittest
@@ -76,11 +77,86 @@ class Dl2FrameToDataTest(unittest.TestCase):
         self.assertEqual(extra, set(), f"_csv_fields에 없는 키: {extra}")
 
 
+def _find_cfs_repo_root():
+    """cfs-telemetry-app repo를 형제 디렉터리에서 탐색 (BL-26/27/28,
+    2026-07-21). 못 찾으면 None — 크로스 repo 테스트는 이 머신에서만
+    돈다는 걸 인정하고 skip 처리(다른 환경에서 깨지지 않게)."""
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    for candidate in (
+        os.path.join(here, "..", "cfs-telemetry-app"),
+        os.path.join(here, "..", "..", "cfs-telemetry-app"),
+    ):
+        candidate = os.path.abspath(candidate)
+        if os.path.isdir(os.path.join(candidate, "lora_tdm_app")):
+            return candidate
+    return None
+
+
+def _parse_c_define(header_path, name):
+    """`#define NAME VALUE`(정수, U/u/L 접미사·주석 허용)를 정규식으로
+    추출 — 손으로 값을 복제하는 대신 C 헤더를 단일 진실로 교차검증."""
+    pattern = re.compile(r"^\s*#define\s+" + re.escape(name) + r"\s+(-?\d+)")
+    with open(header_path, "r", encoding="utf-8") as f:
+        for line in f:
+            m = pattern.match(line)
+            if m:
+                return int(m.group(1))
+    raise AssertionError(f"{name} not found in {header_path}")
+
+
+_CFS_ROOT = _find_cfs_repo_root()
+
+
 class LoraProtocolV2SyncTest(unittest.TestCase):
     def test_dl2_base_len_includes_sats_field(self):
         """lora_protocol_v2.py가 cfs-telemetry-app/bridge/lora_downlink_decoder.py
         최신본(45바이트, sats 포함)과 동기화된 상태인지 회귀 확인."""
         self.assertEqual(DL2_BASE_LEN, 45)
+
+    @unittest.skipUnless(_CFS_ROOT, "cfs-telemetry-app repo가 형제 디렉터리에 없음")
+    def test_dl2_base_len_matches_c_header(self):
+        """BL-26(2026-07-21): DL2_BASE_LEN이 기체 C 헤더
+        (LORA_TDM_APP_DL2_LEN_FIELD)와 실제로 일치하는지 확인 —
+        자기 자신과의 비교(위 테스트)만으로는 크로스 repo 드리프트를
+        못 잡음."""
+        header = os.path.join(
+            _CFS_ROOT, "lora_tdm_app", "fsw", "inc", "lora_tdm_app_interface_cfg.h"
+        )
+        c_value = _parse_c_define(header, "LORA_TDM_APP_DL2_LEN_FIELD")
+        self.assertEqual(DL2_BASE_LEN, c_value)
+
+
+class ParamBoundsSyncTest(unittest.TestCase):
+    """BL-27(2026-07-21): fc_serial_ws_server.py의 PARAM_BOUNDS가 기체
+    C 상수(손으로 복제한 값)와 실제로 일치하는지 교차검증."""
+
+    @unittest.skipUnless(_CFS_ROOT, "cfs-telemetry-app repo가 형제 디렉터리에 없음")
+    def test_cfs_core_bounds_match_c_header(self):
+        header = os.path.join(
+            _CFS_ROOT, "cfs_core_app", "config", "default_cfs_core_app_internal_cfg_values.h"
+        )
+        lo = _parse_c_define(header, "CFS_CORE_APP_PARAM_MIN_MS")
+        hi = _parse_c_define(header, "CFS_CORE_APP_PARAM_MAX_MS")
+        self.assertEqual(srv.PARAM_BOUNDS["cfs_core"]["attitude_timeout_ms"], (lo, hi))
+
+    @unittest.skipUnless(_CFS_ROOT, "cfs-telemetry-app repo가 형제 디렉터리에 없음")
+    def test_mavlink_bridge_bounds_match_c_header(self):
+        header = os.path.join(
+            _CFS_ROOT,
+            "mavlink_bridge_app",
+            "config",
+            "default_mavlink_bridge_app_internal_cfg_values.h",
+        )
+        us_lo = _parse_c_define(header, "MAVLINK_BRIDGE_APP_PARAM_INTERVAL_MIN_US")
+        us_hi = _parse_c_define(header, "MAVLINK_BRIDGE_APP_PARAM_INTERVAL_MAX_US")
+        ms_lo = _parse_c_define(header, "MAVLINK_BRIDGE_APP_PARAM_MS_MIN")
+        ms_hi = _parse_c_define(header, "MAVLINK_BRIDGE_APP_PARAM_MS_MAX")
+        self.assertEqual(
+            srv.PARAM_BOUNDS["mavlink_bridge"]["attitude_interval_us"], (us_lo, us_hi)
+        )
+        self.assertEqual(
+            srv.PARAM_BOUNDS["mavlink_bridge"]["reconnect_interval_ms"], (ms_lo, ms_hi)
+        )
 
 
 class Crc16Test(unittest.TestCase):

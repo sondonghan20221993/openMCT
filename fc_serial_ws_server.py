@@ -194,8 +194,8 @@ LORA_TDM_PARAMS = {
 # cfs_core_app: default_cfs_core_app_internal_cfg_values.h (PARAM_MIN_MS/MAX_MS)
 # mavlink_bridge_app: default_mavlink_bridge_app_internal_cfg_values.h
 #   (PARAM_INTERVAL_MIN_US/MAX_US, PARAM_MS_MIN/MAX)
-# lora_tdm_app: 기체측 코드는 !=0 을 1로 clamp할 뿐 범위 검증이 없으나,
-#   0/1 외 값을 보내는 것은 의도가 불분명하므로 지상에서 0/1로 제한한다.
+# lora_tdm_app: 기체측도 0/1만 수락하도록 엄격화됨(BL-16, 2026-07-21,
+#   lora_tdm_app_cmds.c/lora_tdm_app_utils.c) — 지상 (0,1) 제한과 대칭 일치.
 _CFS_CORE_MS_BOUNDS       = (100, 60000)
 _MAVLINK_BRIDGE_US_BOUNDS = (10000, 10000000)
 _MAVLINK_BRIDGE_MS_BOUNDS = (100, 60000)
