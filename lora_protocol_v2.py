@@ -29,6 +29,7 @@ ACK2_MAGIC = 0xA2
 
 DL2_BASE_LEN = 45          # magic..linkstate (CRC 제외, SysTime 블록 제외) — sats 포함(2026-07-13)
 DL2_SYSTIME_BLOCK_LEN = 8
+DL2_TAIL_LEN = 3           # uplink_last_seq(u16)+uplink_boot_count(u8) — BL-03(2026-07-22), SysTime 뒤/CRC 앞
 DL2_FLAG_SYSTIME = 0x01
 DL2_FLAG_POS_SATURATED = 0x02
 
@@ -72,6 +73,8 @@ class Dl2Frame:
     fault: int
     linkstate: int
     sys_time_unix_usec: Optional[int] = None
+    uplink_last_seq: int = 0    # BL-03(2026-07-22): 기체가 마지막 수락한 uplink seq — 지상 자가복구용
+    uplink_boot_count: int = 0  # BL-03: 기체 부팅 카운터(uint8 wrap) — 재부팅 감지용
 
     @property
     def pos_saturated(self) -> bool:
@@ -101,8 +104,15 @@ def decode_dl2(frame: bytes) -> Dl2Frame:
     (fix, sats, health, fault, linkstate) = struct.unpack_from("<BBBBB", frame, 40)
 
     sys_time = None
-    if flags & DL2_FLAG_SYSTIME and len(frame) >= DL2_BASE_LEN + DL2_SYSTIME_BLOCK_LEN + 2:
+    tail_offset = DL2_BASE_LEN
+    if flags & DL2_FLAG_SYSTIME and len(frame) >= DL2_BASE_LEN + DL2_SYSTIME_BLOCK_LEN + DL2_TAIL_LEN + 2:
         (sys_time,) = struct.unpack_from("<Q", frame, DL2_BASE_LEN)
+        tail_offset = DL2_BASE_LEN + DL2_SYSTIME_BLOCK_LEN
+
+    uplink_last_seq = 0
+    uplink_boot_count = 0
+    if len(frame) >= tail_offset + DL2_TAIL_LEN + 2:
+        (uplink_last_seq, uplink_boot_count) = struct.unpack_from("<HB", frame, tail_offset)
 
     return Dl2Frame(
         seq=seq, flags=flags, ufb=ufb, ts_ms=ts_ms,
@@ -114,6 +124,7 @@ def decode_dl2(frame: bytes) -> Dl2Frame:
         lat_e7=lat_e7, lon_e7=lon_e7, alt_mm=alt_mm,
         fix=fix, sats=sats, health=health, fault=fault, linkstate=linkstate,
         sys_time_unix_usec=sys_time,
+        uplink_last_seq=uplink_last_seq, uplink_boot_count=uplink_boot_count,
     )
 
 
@@ -122,7 +133,7 @@ def encode_dl2(frame: Dl2Frame) -> bytes:
     flags = frame.flags
     if frame.sys_time_unix_usec is not None:
         flags |= DL2_FLAG_SYSTIME
-    body_len = DL2_BASE_LEN + (DL2_SYSTIME_BLOCK_LEN if frame.sys_time_unix_usec is not None else 0)
+    body_len = DL2_BASE_LEN + (DL2_SYSTIME_BLOCK_LEN if frame.sys_time_unix_usec is not None else 0) + DL2_TAIL_LEN
 
     buf = bytearray()
     buf += struct.pack("<BBHBBI", DL2_MAGIC, body_len, frame.seq, flags, frame.ufb, frame.ts_ms)
@@ -142,6 +153,7 @@ def encode_dl2(frame: Dl2Frame) -> bytes:
     buf += struct.pack("<BBBBB", frame.fix, frame.sats, frame.health, frame.fault, frame.linkstate)
     if frame.sys_time_unix_usec is not None:
         buf += struct.pack("<Q", frame.sys_time_unix_usec)
+    buf += struct.pack("<HB", frame.uplink_last_seq & 0xFFFF, frame.uplink_boot_count & 0xFF)
     buf += struct.pack("<H", crc16_ccitt(bytes(buf)))
     return bytes(buf)
 
@@ -226,7 +238,9 @@ class DownlinkStream:
         if len(buf) < 2:
             return None, 0
         body_len = buf[1]
-        if body_len < DL2_BASE_LEN or body_len > DL2_BASE_LEN + DL2_SYSTIME_BLOCK_LEN:
+        min_len = DL2_BASE_LEN + DL2_TAIL_LEN
+        max_len = DL2_BASE_LEN + DL2_SYSTIME_BLOCK_LEN + DL2_TAIL_LEN
+        if body_len < min_len or body_len > max_len:
             return DecodeError("bad DL2 len %d" % body_len), 1
         total = body_len + 2  # + CRC16
         if len(buf) < total:

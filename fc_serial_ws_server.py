@@ -58,6 +58,7 @@ _csv_fields = [
     'uplink_fb', 'link_state',            # parse_lora_line이 채우지만 기존 목록에 누락돼 있었음
     '_ack_send_ms', '_rx_total_ms',       # Stage 1/2 실측용 (openmct_bridge_notes.md 참조)
     'sys_time_unix_usec',                 # GPS 기반 UTC (DL2 전용, §16.4 — notes/temp/gps_time_sync_164_implementation.md)
+    'uplink_last_seq', 'uplink_boot_count', # BL-03(2026-07-22): 지상 자가복구/재부팅감지용 (DL2 전용)
 ]
 
 def _init_csv():
@@ -228,8 +229,52 @@ class _SeqCounter:
             self._v = (self._v % 0xFFFF) + 1
             return v
 
+    def resync_from_device(self, device_last_accepted_seq: int) -> None:
+        """BL-03(2026-07-22): 기체가 다운링크로 보고하는
+        uplink_last_seq(=마지막 수락 seq)를 보고 앞으로만 당김.
+        지상 프로세스 재시작으로 카운터가 기체보다 뒤처졌을 때(문제 2)
+        자동 복구 — 절대 뒤로는 안 당김(오래된/지연 프레임이 카운터를
+        되돌리는 사고 방지)."""
+        with self._lock:
+            candidate = (device_last_accepted_seq % 0xFFFF) + 1
+            if candidate > self._v:
+                self._v = candidate
+
 
 _seq_counter = _SeqCounter()
+
+
+class _BootCountTracker:
+    """BL-03/BL-12(2026-07-22): 기체 boot_count(uint8 wrap) 추이를 보고
+    재부팅 감지 + 비정상 감소(상태파일 손상/위조 의심) 플래그를 노출한다.
+    "감소=자동거부"는 절대 하지 않는다 — 상태파일 정상 유실(전원차단)로도
+    감소처럼 보일 수 있어(§AcceptedCount=0 폴백) 오탐 시 명령권을 영구
+    상실시킬 위험이 있음. 대신 anomaly 플래그만 세워 운영자 확인을 유도."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.last_seen = None
+        self.anomaly = False
+
+    def observe(self, boot_count: int) -> None:
+        with self._lock:
+            if self.last_seen is None:
+                self.last_seen = boot_count
+                return
+            if boot_count == self.last_seen:
+                return
+            diff = (boot_count - self.last_seen) % 256
+            if diff < 128:
+                # 정상 전진(재부팅 포함, wrap 포함) — anomaly 해제
+                self.last_seen = boot_count
+                self.anomaly = False
+            else:
+                # 감소로 보임 — 자동 거부는 하지 않고 플래그만
+                self.anomaly = True
+                self.last_seen = boot_count
+
+
+_boot_count_tracker = _BootCountTracker()
 
 
 def _crc16(data: bytes) -> int:
@@ -392,6 +437,7 @@ class UplinkHandler(BaseHTTPRequestHandler):
                 },
                 "bounds": PARAM_BOUNDS,
                 "transport": "lora",
+                "boot_count_anomaly": _boot_count_tracker.anomaly,  # BL-03: 감소 감지 시 운영자 확인 필요
             })
         else:
             self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
@@ -682,6 +728,8 @@ def dl2_frame_to_data(frame: Dl2Frame) -> dict:
     """
     ts = int(time.time() * 1000)
     _update_link(frame.seq)
+    _seq_counter.resync_from_device(frame.uplink_last_seq)
+    _boot_count_tracker.observe(frame.uplink_boot_count)
     data = {
         "timestamp": ts, "source": "DL2",
         "seq": frame.seq, "boot_ms": frame.ts_ms,
@@ -692,6 +740,7 @@ def dl2_frame_to_data(frame: Dl2Frame) -> dict:
         "fix": frame.fix, "sats": frame.sats,
         "health_state": frame.health, "fault_code": frame.fault, "link_state": frame.linkstate,
         "uplink_fb": frame.ufb,
+        "uplink_last_seq": frame.uplink_last_seq, "uplink_boot_count": frame.uplink_boot_count,
         "heartbeat": _heartbeat, "packet_loss": _packet_loss,
     }
     if frame.sys_time_unix_usec is not None:
