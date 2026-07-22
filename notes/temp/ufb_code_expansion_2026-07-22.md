@@ -55,8 +55,12 @@ UFB 전용 독립 번호 체계(무선 프로토콜을 SB 내부 enum과 분리)
 
 ## 상태
 
-- [ ] plugin.js `onUFBReceived()`에 0x04~0x0B 분기 추가
-- [ ] (선택) lora_protocol_v2.py / lora_downlink_decoder.py에 이름 매핑 헬퍼 추가
-- [ ] 기존 uncommitted 변경(`my_openmct_app/src/plugins/uplinkGUI/plugin.js`,
-      이 문서 작성 시점 기준 git status에 이미 M으로 잡혀 있음, 이 작업과
-      무관 — 별도 확인 후 처리할 것, 이번 커밋에 섞지 않음)
+- [x] **완료(2026-07-22)**: plugin.js `onUFBReceived()`에 0x04~0x0B 분기 추가.
+      추가로 `cfs-telemetry-app` BL-CTR(counter management, 같은 날 후속
+      작업)에서 신설된 0x0C(`REJECT_COUNTER`)도 같이 반영 — 이 문서의 표는
+      0x0B까지만 다루지만 실제 코드는 0x0C까지 처리한다.
+      기존 uncommitted 변경(UFB=0 문구 수정 + UFB=3 분기, 이 문서 작성
+      시점에 이미 M으로 잡혀 있던 것)도 같은 함수 블록이라 이번 커밋에
+      함께 포함.
+- [ ] (선택, 미착수) lora_protocol_v2.py / lora_downlink_decoder.py에
+      이름 매핑 헬퍼 추가 — 필수 아님, 현재 값 그대로 통과돼도 기능 동작함

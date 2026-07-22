@@ -147,7 +147,11 @@ export default function uplinkGUIPlugin(serverUrl = DEFAULT_SERVER) {
                     if (ufbTimeoutHandle) clearTimeout(ufbTimeoutHandle);
 
                     if (ufb === 0) {
-                        log(`[✅ UFB=0] 기체가 명령을 수신했습니다! ${pendingCommand.describe()} (적용됨)`, 'ug-ok');
+                        // UFB_OK는 "정상 처리"와 "보고할 pending 결과 없음(default)"을
+                        // 구분하지 못하는 구조적 한계가 있음(lora_tdm_app_behavior_spec.md
+                        // §10 "알려진 한계" 참조) — CRC/SEQ_FAIL/STATE_BLOCKED가 아니라는
+                        // 것만 확정, "적용됨" 단정은 하지 않는다.
+                        log(`[✅ UFB=0] 오류 없이 수신됨 (CRC/SEQ/STATE 정상) — ${pendingCommand.describe()}`, 'ug-ok');
                         clearPendingCommand();
                     } else if (ufb === 1) {
                         pendingCommand.retryCount++;
@@ -167,6 +171,38 @@ export default function uplinkGUIPlugin(serverUrl = DEFAULT_SERVER) {
                         }
                     } else if (ufb === 2) {
                         log(`[⚠️ UFB=2] 시퀀스 오류, 수동으로 다시 시도하세요 — ${pendingCommand.describe()}`, 'ug-warn');
+                        clearPendingCommand();
+                    } else if (ufb === 3) {
+                        log(`[🚫 UFB=3] 헬스 게이트에 막힘 (health_state 확인 필요) — ${pendingCommand.describe()}`, 'ug-err');
+                        clearPendingCommand();
+                    } else if (ufb === 4) {
+                        log(`[❌ UFB=4] 일반 처리 실패 — ${pendingCommand.describe()}`, 'ug-err');
+                        clearPendingCommand();
+                    } else if (ufb === 5) {
+                        log(`[❌ UFB=5] 프로토콜 버전 불일치 — ${pendingCommand.describe()}`, 'ug-err');
+                        clearPendingCommand();
+                    } else if (ufb === 6) {
+                        log(`[❌ UFB=6] 알 수 없는 커맨드 클래스 — ${pendingCommand.describe()}`, 'ug-err');
+                        clearPendingCommand();
+                    } else if (ufb === 7) {
+                        log(`[❌ UFB=7] 페이로드 길이 불일치 — ${pendingCommand.describe()}`, 'ug-err');
+                        clearPendingCommand();
+                    } else if (ufb === 8) {
+                        log(`[❌ UFB=8] 라우팅 대상 없음 — ${pendingCommand.describe()}`, 'ug-err');
+                        clearPendingCommand();
+                    } else if (ufb === 9) {
+                        log(`[❌ UFB=9] 라우트 갱신 거부 — ${pendingCommand.describe()}`, 'ug-err');
+                        clearPendingCommand();
+                    } else if (ufb === 10) {
+                        log(`[❌ UFB=0x0A] 프록시 명령 체크섬 불일치 — ${pendingCommand.describe()}`, 'ug-err');
+                        clearPendingCommand();
+                    } else if (ufb === 11) {
+                        log(`[❌ UFB=0x0B] VIEWPOINT 페이로드 거부 — ${pendingCommand.describe()}`, 'ug-err');
+                        clearPendingCommand();
+                    } else if (ufb === 12) {
+                        // cfs-telemetry-app BL-CTR(2026-07-22): counter management
+                        // 명령의 scope/action 오류 또는 Level 3 인가 차단
+                        log(`[❌ UFB=0x0C] counter management 거부 (scope/action 오류 또는 인가 차단) — ${pendingCommand.describe()}`, 'ug-err');
                         clearPendingCommand();
                     }
                 }
