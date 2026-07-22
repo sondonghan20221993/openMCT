@@ -27,8 +27,9 @@ const HELP = {
         '  config <scope> <param> <value>      Send CONFIG command to uplink_app',
         '  route <mission|landing> x,y,z ...   Send ROUTE_UPDATE command to uplink_app',
         '  recovery [payload_hex]              Send RECOVERY command (action byte drives cfs_core_app restart, see help recovery)',
+        '  counter <scope>                     Reset target app counters (scope: mavlink_bridge|cfs_core|uplink|lora_tdm)',
         '  uplinktest                          Check uplink server health and available params',
-        '  help [config|route|recovery]        Show detailed help',
+        '  help [config|route|recovery|counter] Show detailed help',
         '  clear                               Clear terminal',
         '',
         'Scopes: cfs_core, mavlink_bridge',
@@ -75,6 +76,20 @@ const HELP = {
         '',
         '  Example: recovery',
         '  Example: recovery 01  (RESTART_BRIDGE)',
+    ].join('\n'),
+
+    counter: [
+        'counter <scope>',
+        '  scope : mavlink_bridge | cfs_core | uplink | lora_tdm',
+        '',
+        '  Counter management (class 7, spec §18.4.6.7, 2026-07-22 BL-CTR):',
+        '  대상 앱의 Cmd/Err 카운터를 RESET한다. uplink_app이 cfs_core_app을',
+        '  거치지 않고 대상 앱의 기존 RESET_COUNTERS CC로 직접 전송.',
+        '  scope=uplink이면 uplink_app 자신의 카운터를 로컬에서 초기화.',
+        '  Level 3 명령 — request_token은 서버가 자동 생성.',
+        '  거부 시 UFB=0x0C(REJECT_COUNTER)로 회신됨.',
+        '',
+        '  Example: counter lora_tdm',
     ].join('\n'),
 };
 
@@ -249,6 +264,34 @@ export default function uplinkCLIPlugin(serverUrl = DEFAULT_SERVER) {
                                 );
                             } else {
                                 appendLine(`[ERR] ${json.error}`, 'uplink-err');
+                            }
+                        } catch (e) {
+                            appendLine(`[ERR] server unreachable (${serverUrl}): ${e.message}`, 'uplink-err');
+                        }
+                        return;
+                    }
+
+                    if (cmd === 'counter') {
+                        const [, scope] = parts;
+                        if (!scope) {
+                            appendLine('[ERR] usage: counter <scope> — type "help counter"', 'uplink-err');
+                            return;
+                        }
+                        try {
+                            const res = await fetch(`${serverUrl}/api/uplink/counter`, {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ scope }),
+                            });
+                            const json = await res.json();
+                            if (json.ok) {
+                                appendLine(
+                                    `[OK] COUNTER reset sent  seq=${json.seq}  scope=${json.scope}`,
+                                    'uplink-ok',
+                                );
+                            } else {
+                                const hint = json.available ? `  available: ${json.available.join(', ')}` : '';
+                                appendLine(`[ERR] ${json.error}${hint}`, 'uplink-err');
                             }
                         } catch (e) {
                             appendLine(`[ERR] server unreachable (${serverUrl}): ${e.message}`, 'uplink-err');

@@ -285,5 +285,42 @@ class ResendEndpointTest(UplinkHandlerTestBase):
         self.assertEqual(status, 400)
 
 
+class CounterEndpointTest(UplinkHandlerTestBase):
+    """BL-CTR(2026-07-22, §18.4.6.7): counter management(class 7) 전송 —
+    payload = scope(1)+action(1,RESET=0)+request_token(4,LE), Level 3."""
+
+    def test_valid_counter_reset_queues_class7_frame(self):
+        status, data = self._post("/api/uplink/counter", {"scope": "lora_tdm"})
+        self.assertEqual(status, 200)
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["scope"], "lora_tdm")
+        self.assertEqual(data["action"], "reset")
+        self.assertNotEqual(data["request_token"], 0)
+
+        with srv._pending_lock:
+            self.assertEqual(len(srv._pending_uplink), 1)
+            seq, payload, cmd_class, flags, _remaining = srv._pending_uplink[0]
+
+        self.assertEqual(cmd_class, srv.UPLINK_CLASS_COUNTER_MGMT)
+        self.assertEqual(len(payload), 6)
+        self.assertEqual(payload[0], srv.COUNTER_SCOPES["lora_tdm"])
+        self.assertEqual(payload[1], srv.COUNTER_ACTION_RESET)
+        # request_token은 기체가 Payload[2..5] LE로 파싱 — 0이면 Level 3 게이트에서 거부됨
+        self.assertEqual(int.from_bytes(payload[2:6], "little"), data["request_token"])
+        # Level 3 → flags bits[7:6] = 3
+        self.assertEqual((flags >> 6) & 0x3, 3)
+
+    def test_all_four_scopes_accepted(self):
+        for scope_name, scope_val in srv.COUNTER_SCOPES.items():
+            status, data = self._post("/api/uplink/counter", {"scope": scope_name})
+            self.assertEqual(status, 200, f"scope={scope_name}")
+            self.assertTrue(data["ok"], f"scope={scope_name}")
+
+    def test_unknown_scope_400(self):
+        status, data = self._post("/api/uplink/counter", {"scope": "bogus"})
+        self.assertEqual(status, 400)
+        self.assertIn("available", data)
+
+
 if __name__ == "__main__":
     unittest.main()

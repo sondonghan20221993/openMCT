@@ -108,6 +108,16 @@ UPLINK_PROTOCOL_VERSION = 1
 UPLINK_CLASS_CONFIG       = 1
 UPLINK_CLASS_ROUTE_UPDATE = 2
 UPLINK_CLASS_RECOVERY     = 4
+UPLINK_CLASS_COUNTER_MGMT = 7  # BL-CTR(2026-07-22), mission_app_runtime_spec.md §18.4.6.7
+
+# §18.4.6.7 counter management scope — 기체 UPLINK_APP_CounterScope_t와 동일 값
+COUNTER_SCOPES = {
+    "mavlink_bridge": 1,
+    "cfs_core": 2,
+    "uplink": 3,
+    "lora_tdm": 4,
+}
+COUNTER_ACTION_RESET = 0  # 현재 유일하게 허용되는 action
 
 # mission_app_runtime_spec.md §18.10.2 — UP 프레임 flags 필드 비트0.
 # 벤치 테스트 전용: health gate(§18.10.1)를 이 명령 하나만 우회.
@@ -121,6 +131,7 @@ UPLINK_CLASS_REQUIRED_LEVEL = {
     UPLINK_CLASS_CONFIG: 2,
     UPLINK_CLASS_ROUTE_UPDATE: 2,
     UPLINK_CLASS_RECOVERY: 3,
+    UPLINK_CLASS_COUNTER_MGMT: 3,  # §18.4.6.7 — Level 3 (request_token≠0 필수)
 }
 
 
@@ -491,6 +502,8 @@ class UplinkHandler(BaseHTTPRequestHandler):
             self._handle_recovery(body)
         elif self.path == "/api/uplink/resend":
             self._handle_resend(body)
+        elif self.path == "/api/uplink/counter":
+            self._handle_counter(body)
         else:
             self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
 
@@ -618,6 +631,34 @@ class UplinkHandler(BaseHTTPRequestHandler):
         print(f"[UP] RECOVERY seq={seq} token={request_token:#010x}  queued  frame={frame}")
         self._json({"ok": True, "seq": seq, "request_token": request_token,
                     "transport": "lora", "queued": True})
+
+    def _handle_counter(self, body: dict):
+        # BL-CTR(2026-07-22, §18.4.6.7): counter management (class 7).
+        # payload = counter_scope(1) + counter_action(1, RESET=0 고정) +
+        #           request_token(4, LE — 기체는 Payload[2..5]에서 파싱).
+        # 라우팅은 기체 uplink_app이 직접 수행(cfs_core_app 미경유).
+        scope_name = body.get("scope")
+        if scope_name not in COUNTER_SCOPES:
+            self._json({"error": f"unknown scope '{scope_name}'",
+                        "available": sorted(COUNTER_SCOPES)}, HTTPStatus.BAD_REQUEST)
+            return
+
+        scope = COUNTER_SCOPES[scope_name]
+        request_token = _generate_request_token()
+        payload = bytes([scope, COUNTER_ACTION_RESET]) + request_token.to_bytes(4, "little")
+
+        seq = _seq_counter.next()
+        try:
+            flags = _auth_level_flag_bits(UPLINK_CLASS_COUNTER_MGMT)
+            frame = _build_lora_frame(seq, payload, UPLINK_CLASS_COUNTER_MGMT, flags)  # 로그용(retx=0 사본)
+            _queue_uplink(seq, payload, UPLINK_CLASS_COUNTER_MGMT, flags)
+        except Exception as e:
+            self._json({"error": str(e)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+
+        print(f"[UP] COUNTER seq={seq} scope={scope_name}({scope}) token={request_token:#010x}  queued  frame={frame}")
+        self._json({"ok": True, "seq": seq, "scope": scope_name, "action": "reset",
+                    "request_token": request_token, "transport": "lora", "queued": True})
 
     def _handle_resend(self, body: dict):
         # BL-24(2026-07-22): UFB=1 자동 재전송용 — 새 seq를 발급하지 않고
