@@ -427,8 +427,12 @@ export default function uplinkGUIPlugin(serverUrl = DEFAULT_SERVER) {
                                 <h3>Config</h3>
                                 <div class="ug-row">
                                     <label>scope</label>
+                                    <!-- ⑦(2026-07-22): cfs_core scope는 GUI에서 제외 — 전부 헬스판정
+                                         튜닝 노브(timeout/period)라 실운용에서 바꿀 일이 없고, 비행 중
+                                         변경은 오히려 위험(헬스 강등 기준이 느슨해짐). 기체 CONFIG
+                                         scope=1 처리와 서버 /api/uplink/meta는 그대로 유지 — 벤치
+                                         튜닝은 CLI/HTTP로 여전히 가능. UPLINK_GUI_ENHANCEMENTS.md ⑦ 참조 -->
                                     <select data-el="scope">
-                                        <option value="cfs_core">cfs_core</option>
                                         <option value="mavlink_bridge">mavlink_bridge</option>
                                         <option value="lora_tdm">lora_tdm</option>
                                     </select>

@@ -371,8 +371,20 @@
 - 거부 시 UFB=0x0C(REJECT_COUNTER)로 회신됨(onUFBReceived 이미 디코딩)
 ```
 
+**기능 명세 — CONFIG scope에서 cfs_core 제외 (2026-07-22 사용자 결정)**:
+```
+- GUI CONFIG scope 드롭다운에서 cfs_core 제거 (mavlink_bridge/lora_tdm만 노출)
+- 근거: cfs_core CONFIG 파라미터 6종(attitude/local/gps/ekf/bridge_timeout_ms,
+  publish_period_ms)은 전부 헬스판정 튜닝 노브 — 실운용에서 바꿀 일이
+  없고, 비행 중 timeout 상향은 FC 데이터 끊김을 가리는(NOMINAL 오표시)
+  위험이 있음
+- GUI에서만 제외 — 기체 CONFIG scope=1 처리, 서버 /api/uplink/meta,
+  uplinkCLI 경로는 유지(벤치 튜닝용). 기능 삭제 아님
+```
+
 **구현 위치**:
-- `plugin.js`: RECOVERY 섹션에 액션 드롭다운 추가, COUNTER 섹션 신설
+- `plugin.js`: RECOVERY 섹션에 액션 드롭다운 추가, COUNTER 섹션 신설,
+  CONFIG scope 드롭다운에서 cfs_core 옵션 제거
 - 서버 변경 없음(엔드포인트 기구현)
 
 **검증 기준**:
