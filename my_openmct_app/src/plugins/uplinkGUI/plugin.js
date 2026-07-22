@@ -345,20 +345,46 @@ export default function uplinkGUIPlugin(serverUrl = DEFAULT_SERVER) {
                 }
 
                 // --- RECOVERY 전송 ---
+                const RECOVERY_ACTION_NAMES = ['RESET_COUNTER', 'RESTART_BRIDGE', 'PARSER_RESET',
+                                               'SERIAL_RECONNECT', 'RESTART_UPLINK', 'RESTART_LORA'];
+
                 async function sendRecovery() {
+                    // ⑦(2026-07-22): raw hex가 있으면 그대로(고급), 없으면 드롭다운
+                    // action으로 payload byte[0]을 구성 — 나머지 바이트는 0(로그용 필드)
                     const hex = els.recoveryHex.value.trim();
-                    const body = hex ? { payload_hex: hex } : {};
+                    const action = Number(els.recoveryAction.value);
+                    const payloadHex = hex || action.toString(16).padStart(2, '0');
+                    const label = hex ? `raw(${hex})` : RECOVERY_ACTION_NAMES[action];
                     try {
-                        const json = await postJSON('/api/uplink/recovery', body);
+                        const json = await postJSON('/api/uplink/recovery', { payload_hex: payloadHex });
                         if (json.ok) {
-                            log(`[OK] RECOVERY sent  seq=${json.seq}`, 'ug-ok');
-                            const describe = () => `recovery ${hex ? `(${hex.length} bytes)` : '(default)'}`;
+                            log(`[OK] RECOVERY ${label} sent  seq=${json.seq}`, 'ug-ok');
+                            const describe = () => `recovery ${label}`;
                             // BL-24: 같은 seq 재큐잉(진짜 재전송) — sendRecovery() 재호출이면
                             // 새 seq+새 request_token으로 별개 명령이 돼 이중 실행 위험
                             const resend = () => postJSON('/api/uplink/resend', { seq: json.seq }).catch(() => { });
                             armPendingCommand('recovery', json.seq, describe, resend);
                         } else {
                             log(`[ERR] ${json.error}`, 'ug-err');
+                        }
+                    } catch (e) {
+                        log(`[ERR] server unreachable (${serverUrl}): ${e.message}`, 'ug-err');
+                    }
+                }
+
+                // --- COUNTER 전송 (⑦, class 7 §18.4.6.7) ---
+                async function sendCounter() {
+                    const scope = els.counterScope.value;
+                    try {
+                        const json = await postJSON('/api/uplink/counter', { scope });
+                        if (json.ok) {
+                            log(`[OK] COUNTER reset sent  seq=${json.seq}  scope=${json.scope}`, 'ug-ok');
+                            const describe = () => `counter reset ${scope}`;
+                            const resend = () => postJSON('/api/uplink/resend', { seq: json.seq }).catch(() => { });
+                            armPendingCommand('counter', json.seq, describe, resend);
+                        } else {
+                            const hint = json.available ? `  available: ${json.available.join(', ')}` : '';
+                            log(`[ERR] ${json.error}${hint}`, 'ug-err');
                         }
                     } catch (e) {
                         log(`[ERR] server unreachable (${serverUrl}): ${e.message}`, 'ug-err');
@@ -445,9 +471,34 @@ export default function uplinkGUIPlugin(serverUrl = DEFAULT_SERVER) {
                             <div class="ug-panel">
                                 <h3>Recovery</h3>
                                 <div class="ug-row">
+                                    <label>action</label>
+                                    <select class="ug-select" data-el="recoveryAction">
+                                        <option value="0">RESET_COUNTER (cfs_core 카운터 리셋)</option>
+                                        <option value="1">RESTART_BRIDGE (mavlink_bridge 재시작)</option>
+                                        <option value="2">PARSER_RESET (파서만 리셋)</option>
+                                        <option value="3">SERIAL_RECONNECT (시리얼만 재연결)</option>
+                                        <option value="4">RESTART_UPLINK (uplink 재시작)</option>
+                                        <option value="5">RESTART_LORA (lora_tdm 재시작)</option>
+                                    </select>
+                                </div>
+                                <div class="ug-row">
                                     <label>hex</label>
-                                    <input class="ug-text" type="text" data-el="recoveryHex" placeholder="(선택) payload_hex — 비우면 기본 RECOVERY">
+                                    <input class="ug-text" type="text" data-el="recoveryHex" placeholder="(고급) raw payload_hex — 입력 시 드롭다운보다 우선">
                                     <button class="ug-send" data-el="sendRecovery" type="button">RECOVERY 전송</button>
+                                </div>
+                            </div>
+
+                            <div class="ug-panel">
+                                <h3>Counter Reset <span style="font-weight:normal;opacity:.7">(class 7, §18.4.6.7)</span></h3>
+                                <div class="ug-row">
+                                    <label>scope</label>
+                                    <select class="ug-select" data-el="counterScope">
+                                        <option value="mavlink_bridge">mavlink_bridge</option>
+                                        <option value="cfs_core">cfs_core</option>
+                                        <option value="uplink">uplink</option>
+                                        <option value="lora_tdm">lora_tdm</option>
+                                    </select>
+                                    <button class="ug-send" data-el="sendCounter" type="button">COUNTER 전송</button>
                                 </div>
                             </div>
 
@@ -466,6 +517,7 @@ export default function uplinkGUIPlugin(serverUrl = DEFAULT_SERVER) {
                         els.addWp.addEventListener('click', () => addWaypointRow());
                         els.sendRoute.addEventListener('click', sendRoute);
                         els.sendRecovery.addEventListener('click', sendRecovery);
+                        els.sendCounter.addEventListener('click', sendCounter);
 
                         rebuildParamOptions();
                         addWaypointRow('0', '-10', '3');   // 예시 웨이포인트 1개

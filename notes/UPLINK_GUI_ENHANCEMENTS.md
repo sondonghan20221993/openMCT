@@ -339,6 +339,50 @@
 
 ---
 
+#### ⑦ 명령 섹션 — RECOVERY 액션 드롭다운 + COUNTER (2026-07-22 추가)
+
+**필요성**: 현재 RECOVERY는 raw payload hex 입력만 있어 운용자가 액션
+바이트 값(0~5)을 외워야 하고, CONFIG 드롭다운에는 파라미터만 있어
+"coreapp 명령(재시작 등)이 GUI에 안 보인다"는 혼선이 있었음(2026-07-22
+사용자 지적). counter management(class 7)는 CLI에만 있고 GUI 경로 없음.
+
+**기능 명세 — RECOVERY 액션 드롭다운**:
+```
+- 드롭다운 항목(값 = payload byte[0], cfs_core_app RecoveryAction 6종):
+    0 = RESET_COUNTER      (cfs_core_app 카운터 리셋)
+    1 = RESTART_BRIDGE     (mavlink_bridge_app 재시작)
+    2 = PARSER_RESET       (mavlink_bridge_app 파서만 리셋)
+    3 = SERIAL_RECONNECT   (mavlink_bridge_app 시리얼만 재연결)
+    4 = RESTART_UPLINK     (uplink_app 재시작)
+    5 = RESTART_LORA       (lora_tdm_app 재시작)
+- 선택 시 payload_hex를 자동 구성(byte[0]=action, 나머지 0) 후
+  기존 /api/uplink/recovery 호출 — request_token은 서버가 자동 생성(기존)
+- 기존 raw hex 입력창은 "고급" 용도로 유지(드롭다운과 병행,
+  hex가 비어있지 않으면 hex 우선)
+- UFB 피드백은 기존 armPendingCommand/onUFBReceived 재사용
+```
+
+**기능 명세 — COUNTER 명령**:
+```
+- scope 드롭다운: mavlink_bridge | cfs_core | uplink | lora_tdm
+  (uplink_app UPLINK_APP_CounterScope_t 1~4와 동일, §18.4.6.7)
+- 전송 버튼 → POST /api/uplink/counter {scope} (2026-07-22 신설 엔드포인트)
+- action은 RESET(0) 고정 — 서버가 payload 구성, token 자동 생성
+- 거부 시 UFB=0x0C(REJECT_COUNTER)로 회신됨(onUFBReceived 이미 디코딩)
+```
+
+**구현 위치**:
+- `plugin.js`: RECOVERY 섹션에 액션 드롭다운 추가, COUNTER 섹션 신설
+- 서버 변경 없음(엔드포인트 기구현)
+
+**검증 기준**:
+- [ ] 드롭다운 선택 → payload byte[0] 정확히 구성되어 전송
+- [ ] raw hex 입력 시 hex가 드롭다운보다 우선
+- [ ] counter 4개 scope 전송 각각 성공(HTTP 200 + seq 반환)
+- [ ] UFB 피드백이 기존 pendingCommand 체계로 표시됨
+
+---
+
 ## 📋 구현 체크리스트
 
 ### Phase 1: 2주차 (4개 기능)
@@ -350,6 +394,9 @@
 ### Phase 2: 3주차 (2개 기능)
 - [ ] ⑤ 설정값 범위 제안
 - [ ] ⑥ 롤백 기능
+
+### 2026-07-22 추가
+- [ ] ⑦ RECOVERY 액션 드롭다운 + COUNTER 섹션
 
 ---
 
