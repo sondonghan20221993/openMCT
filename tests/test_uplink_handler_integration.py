@@ -227,5 +227,28 @@ class RetxIndexFlushTest(UplinkHandlerTestBase):
             self.assertEqual(len(srv._pending_uplink), 0)
 
 
+class UplinkQueueCapTest(UplinkHandlerTestBase):
+    """BL-23(2026-07-22): 다운링크 단절로 flush가 안 불려도 큐가 무한정
+    쌓이지 않도록 상한(16)을 둔다 — 초과 시 가장 오래된 항목을 버리고
+    새 명령은 그대로 accept(HTTP 에러 아님)."""
+
+    def test_over_capacity_drops_oldest_and_still_accepts_new(self):
+        seqs = []
+        for i in range(srv._UPLINK_QUEUE_MAX_SIZE + 3):
+            status, data = self._post("/api/uplink/config",
+                                       {"scope": "cfs_core", "param": "attitude_timeout_ms",
+                                        "value": 500 + i})
+            self.assertEqual(status, 200)
+            self.assertTrue(data["ok"])
+            seqs.append(data["seq"])
+
+        with srv._pending_lock:
+            self.assertEqual(len(srv._pending_uplink), srv._UPLINK_QUEUE_MAX_SIZE)
+            remaining_seqs = [item[0] for item in srv._pending_uplink]
+
+        # 가장 오래된 3개(첫 3개 seq)는 버려지고, 최신 항목들만 남아야 함
+        self.assertEqual(remaining_seqs, seqs[3:])
+
+
 if __name__ == "__main__":
     unittest.main()

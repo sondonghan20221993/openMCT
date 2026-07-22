@@ -404,9 +404,24 @@ _pending_uplink: list = []   # [[seq, payload, cmd_class, base_flags, remaining_
 _RETX_IDX_SHIFT = 1
 _RETX_IDX_MASK = 0x3
 
+# BL-23(2026-07-22): flush는 지금처럼 다운링크 수신 시에만 실제 전송한다
+# (반이중 TDM 슬롯 정렬을 깨지 않기 위해 타이머 기반 강제 송신은 넣지
+# 않음, ambiguity_audit_by_task_2026-07-21.md 우려 반영). 대신 다운링크가
+# 끊긴 채로 새 명령이 계속 큐에 쌓이는 것을 막기 위해 큐 크기 상한을
+# 둔다 — 평시엔 매 다운링크(~150~200ms)마다 비워져 1~2개 이상 쌓일 일이
+# 없으므로, 16은 정상 동작을 방해하지 않는 넉넉한 안전장치일 뿐이다
+# (사용자 결정, 2026-07-22). 초과 시 HTTP 에러가 아니라 가장 오래된
+# 항목을 버리고 경고 로그만 남긴다 — 새 명령은 그대로 accept.
+_UPLINK_QUEUE_MAX_SIZE = 16
+
 
 def _queue_uplink(seq: int, payload: bytes, cmd_class: int, flags: int = 0) -> None:
     with _pending_lock:
+        if len(_pending_uplink) >= _UPLINK_QUEUE_MAX_SIZE:
+            dropped_seq, _payload, dropped_class, _flags, dropped_remaining = _pending_uplink.pop(0)
+            print(f"[UP QUEUE FULL] dropped oldest seq={dropped_seq} class={dropped_class} "
+                  f"remaining_retx={dropped_remaining} (max={_UPLINK_QUEUE_MAX_SIZE}) — "
+                  f"다운링크 단절 추정, 기체 미도달")
         _pending_uplink.append([seq, payload, cmd_class, flags, _UPLINK_RETX])
 
 
