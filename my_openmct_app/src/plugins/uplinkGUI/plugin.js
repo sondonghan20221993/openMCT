@@ -156,7 +156,7 @@ export default function uplinkGUIPlugin(serverUrl = DEFAULT_SERVER) {
                     } else if (ufb === 1) {
                         pendingCommand.retryCount++;
                         if (pendingCommand.retryCount <= 3) {
-                            log(`[❌ UFB=1] CRC 오류! 자동으로 다시 전송합니다... (${pendingCommand.retryCount}/3)`, 'ug-err');
+                            log(`[❌ UFB=1] CRC 오류! 같은 seq=${pendingCommand.seq}로 재전송합니다... (${pendingCommand.retryCount}/3)`, 'ug-err');
                             pendingCommand.timestamp = Date.now();
                             ufbTimeoutHandle = setTimeout(() => {
                                 if (pendingCommand) {
@@ -296,7 +296,9 @@ export default function uplinkGUIPlugin(serverUrl = DEFAULT_SERVER) {
                         if (json.ok) {
                             log(`[OK] CONFIG accepted  seq=${json.seq}  ${json.scope}.${json.param}=${json.value}`, 'ug-ok');
                             const describe = () => `config ${scope}.${param}=${value}`;
-                            const resend = () => sendConfig();
+                            // BL-24: 새 seq 재조립이 아니라 같은 seq 재큐잉(진짜 재전송) —
+                            // 원본이 이미 수락됐어도 기체가 DUPLICATE로 무시해 이중 실행 방지
+                            const resend = () => postJSON('/api/uplink/resend', { seq: json.seq }).catch(() => { });
                             armPendingCommand('config', json.seq, describe, resend);
                         } else {
                             const hint = json.available ? `  available: ${json.available.join(', ')}` : '';
@@ -331,7 +333,8 @@ export default function uplinkGUIPlugin(serverUrl = DEFAULT_SERVER) {
                         if (json.ok) {
                             log(`[OK] ROUTE sent  seq=${json.seq}  ${json.route_type}  wps=${json.waypoint_count}`, 'ug-ok');
                             const describe = () => `route ${routeType} (${waypoints.length} waypoints)`;
-                            const resend = () => sendRoute();
+                            // BL-24: 같은 seq 재큐잉(진짜 재전송)
+                            const resend = () => postJSON('/api/uplink/resend', { seq: json.seq }).catch(() => { });
                             armPendingCommand('route', json.seq, describe, resend);
                         } else {
                             log(`[ERR] ${json.error}`, 'ug-err');
@@ -350,7 +353,9 @@ export default function uplinkGUIPlugin(serverUrl = DEFAULT_SERVER) {
                         if (json.ok) {
                             log(`[OK] RECOVERY sent  seq=${json.seq}`, 'ug-ok');
                             const describe = () => `recovery ${hex ? `(${hex.length} bytes)` : '(default)'}`;
-                            const resend = () => sendRecovery();
+                            // BL-24: 같은 seq 재큐잉(진짜 재전송) — sendRecovery() 재호출이면
+                            // 새 seq+새 request_token으로 별개 명령이 돼 이중 실행 위험
+                            const resend = () => postJSON('/api/uplink/resend', { seq: json.seq }).catch(() => { });
                             armPendingCommand('recovery', json.seq, describe, resend);
                         } else {
                             log(`[ERR] ${json.error}`, 'ug-err');

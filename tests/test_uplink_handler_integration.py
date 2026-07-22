@@ -250,5 +250,40 @@ class UplinkQueueCapTest(UplinkHandlerTestBase):
         self.assertEqual(remaining_seqs, seqs[3:])
 
 
+class ResendEndpointTest(UplinkHandlerTestBase):
+    """BL-24(2026-07-22): UFB=1 재전송은 새 seq 재조립이 아니라 캐시된
+    원본을 같은 seq로 재큐잉(진짜 재전송) — 원본이 이미 수락됐어도
+    기체 DUPLICATE 방어로 이중 실행이 불가능해진다."""
+
+    def test_resend_requeues_same_seq_and_payload(self):
+        status, data = self._post("/api/uplink/config",
+                                   {"scope": "cfs_core", "param": "attitude_timeout_ms", "value": 500})
+        self.assertEqual(status, 200)
+        orig_seq = data["seq"]
+
+        with srv._pending_lock:
+            orig_item = [it[:4] for it in srv._pending_uplink if it[0] == orig_seq][0]
+
+        status, data = self._post("/api/uplink/resend", {"seq": orig_seq})
+        self.assertEqual(status, 200)
+        self.assertTrue(data["ok"])
+        self.assertTrue(data["resend"])
+        self.assertEqual(data["seq"], orig_seq)   # 새 seq 발급 없음
+
+        with srv._pending_lock:
+            matches = [it[:4] for it in srv._pending_uplink if it[0] == orig_seq]
+        self.assertEqual(len(matches), 2)          # 원본 + 재전송본
+        self.assertEqual(matches[0], matches[1])   # seq/payload/class/flags 완전 동일
+
+    def test_resend_unknown_seq_404(self):
+        status, data = self._post("/api/uplink/resend", {"seq": 60000})
+        self.assertEqual(status, 404)
+        self.assertIn("error", data)
+
+    def test_resend_missing_seq_400(self):
+        status, data = self._post("/api/uplink/resend", {})
+        self.assertEqual(status, 400)
+
+
 if __name__ == "__main__":
     unittest.main()

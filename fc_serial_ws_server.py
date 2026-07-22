@@ -414,6 +414,15 @@ _RETX_IDX_MASK = 0x3
 # 항목을 버리고 경고 로그만 남긴다 — 새 명령은 그대로 accept.
 _UPLINK_QUEUE_MAX_SIZE = 16
 
+# BL-24(2026-07-22): UFB=1(CRC_FAIL) 자동 재전송이 새 seq를 발급하면,
+# 큐에 남아있던 원본 seq 사본이 뒤늦게 수락될 경우 같은 명령이 두 번
+# 실행되는 경합이 있다(새 seq는 기체에 정상 신규 명령으로 보임).
+# 같은 seq 재전송이면 원본이 이미 수락됐어도 DUPLICATE(BL-01)로 무시돼
+# 이중 실행이 구조적으로 불가능 — 최근 전송 명령을 seq별로 캐시해두고
+# /api/uplink/resend가 같은 seq 그대로 재큐잉한다(A안, 사용자 결정).
+_SENT_CACHE_MAX = 32
+_sent_commands: dict = {}    # seq → (payload, cmd_class, flags)
+
 
 def _queue_uplink(seq: int, payload: bytes, cmd_class: int, flags: int = 0) -> None:
     with _pending_lock:
@@ -423,6 +432,9 @@ def _queue_uplink(seq: int, payload: bytes, cmd_class: int, flags: int = 0) -> N
                   f"remaining_retx={dropped_remaining} (max={_UPLINK_QUEUE_MAX_SIZE}) — "
                   f"다운링크 단절 추정, 기체 미도달")
         _pending_uplink.append([seq, payload, cmd_class, flags, _UPLINK_RETX])
+        _sent_commands[seq] = (payload, cmd_class, flags)
+        while len(_sent_commands) > _SENT_CACHE_MAX:
+            _sent_commands.pop(next(iter(_sent_commands)))  # 삽입순 → 가장 오래된 것부터
 
 
 def _flush_pending_uplink() -> None:
@@ -477,6 +489,8 @@ class UplinkHandler(BaseHTTPRequestHandler):
             self._handle_route(body)
         elif self.path == "/api/uplink/recovery":
             self._handle_recovery(body)
+        elif self.path == "/api/uplink/resend":
+            self._handle_resend(body)
         else:
             self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
 
@@ -604,6 +618,27 @@ class UplinkHandler(BaseHTTPRequestHandler):
         print(f"[UP] RECOVERY seq={seq} token={request_token:#010x}  queued  frame={frame}")
         self._json({"ok": True, "seq": seq, "request_token": request_token,
                     "transport": "lora", "queued": True})
+
+    def _handle_resend(self, body: dict):
+        # BL-24(2026-07-22): UFB=1 자동 재전송용 — 새 seq를 발급하지 않고
+        # 캐시된 원본 명령을 같은 seq 그대로 재큐잉한다(진짜 재전송).
+        # 원본이 이미 기체에 수락된 경우에도 DUPLICATE로 무시돼 무해.
+        seq = body.get("seq")
+        if not isinstance(seq, int):
+            self._json({"error": "seq (int) required"}, HTTPStatus.BAD_REQUEST)
+            return
+
+        with _pending_lock:
+            cached = _sent_commands.get(seq)
+        if cached is None:
+            self._json({"error": f"seq {seq} not in sent cache (max {_SENT_CACHE_MAX} entries)"},
+                       HTTPStatus.NOT_FOUND)
+            return
+
+        payload, cmd_class, flags = cached
+        _queue_uplink(seq, payload, cmd_class, flags)
+        print(f"[UP] RESEND seq={seq} class={cmd_class}  requeued (same seq)")
+        self._json({"ok": True, "seq": seq, "transport": "lora", "queued": True, "resend": True})
 
     def _read_body(self) -> dict | None:
         length = int(self.headers.get("Content-Length", 0))
