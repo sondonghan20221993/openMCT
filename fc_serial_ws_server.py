@@ -395,12 +395,19 @@ def _lora_send_ack2(seq_echo: int) -> None:
 # replay로 거부(무해)된다. 즉 한 번의 명령으로도 안정적으로 도달한다.
 _UPLINK_RETX = 4
 _pending_lock = threading.Lock()
-_pending_uplink: list = []   # [[frame, remaining_retx], ...]
+_pending_uplink: list = []   # [[seq, payload, cmd_class, base_flags, remaining_retx], ...]
+
+# BL-14(2026-07-22): Flags bits[2:1]=RETX_IDX(0~3 = 슬롯번호-1). 사본마다
+# flags가 달라 프레임을 슬롯마다 재조립(CRC도 사본별 재계산). 기체는 이
+# 값으로 동작을 바꾸지 않고 EVS 로그에만 표기 — "몇 번째 슬롯에서
+# 통과했는지"로 RF 링크 마진을 진단(mission_app_runtime_spec.md §18.4.3.1).
+_RETX_IDX_SHIFT = 1
+_RETX_IDX_MASK = 0x3
 
 
-def _queue_uplink(frame: str) -> None:
+def _queue_uplink(seq: int, payload: bytes, cmd_class: int, flags: int = 0) -> None:
     with _pending_lock:
-        _pending_uplink.append([frame, _UPLINK_RETX])
+        _pending_uplink.append([seq, payload, cmd_class, flags, _UPLINK_RETX])
 
 
 def _flush_pending_uplink() -> None:
@@ -408,11 +415,14 @@ def _flush_pending_uplink() -> None:
         if not _pending_uplink:
             return
         for item in _pending_uplink:
-            _lora_send(item[0])
-            n = _UPLINK_RETX - item[1] + 1
-            print(f"[UP->slot] ({n}/{_UPLINK_RETX}) {item[0]}")
-            item[1] -= 1
-        _pending_uplink[:] = [it for it in _pending_uplink if it[1] > 0]
+            seq, payload, cmd_class, base_flags, remaining = item
+            retx_idx = _UPLINK_RETX - remaining          # 0=첫 전송, 1~3=재전송
+            flags = base_flags | ((retx_idx & _RETX_IDX_MASK) << _RETX_IDX_SHIFT)
+            frame = _build_lora_frame(seq, payload, cmd_class, flags)
+            _lora_send(frame)
+            print(f"[UP->slot] ({retx_idx + 1}/{_UPLINK_RETX}) {frame}")
+            item[4] -= 1
+        _pending_uplink[:] = [it for it in _pending_uplink if it[4] > 0]
 
 # ---------------------------------------------------------------------------
 # HTTP uplink server
@@ -503,8 +513,8 @@ class UplinkHandler(BaseHTTPRequestHandler):
         seq = _seq_counter.next()
         try:
             payload = _build_config_payload(scope, params[param], value)
-            frame   = _build_lora_frame(seq, payload, UPLINK_CLASS_CONFIG, flags)
-            _queue_uplink(frame)
+            frame   = _build_lora_frame(seq, payload, UPLINK_CLASS_CONFIG, flags)  # 로그용(retx=0 사본)
+            _queue_uplink(seq, payload, UPLINK_CLASS_CONFIG, flags)
         except Exception as e:
             self._json({"error": str(e)}, HTTPStatus.INTERNAL_SERVER_ERROR)
             return
@@ -543,8 +553,8 @@ class UplinkHandler(BaseHTTPRequestHandler):
         try:
             payload = _build_route_payload(route_type, ROUTE_VERSION, waypoints)
             flags   = _auth_level_flag_bits(UPLINK_CLASS_ROUTE_UPDATE)
-            frame   = _build_lora_frame(seq, payload, UPLINK_CLASS_ROUTE_UPDATE, flags)
-            _queue_uplink(frame)
+            frame   = _build_lora_frame(seq, payload, UPLINK_CLASS_ROUTE_UPDATE, flags)  # 로그용(retx=0 사본)
+            _queue_uplink(seq, payload, UPLINK_CLASS_ROUTE_UPDATE, flags)
         except Exception as e:
             self._json({"error": str(e)}, HTTPStatus.INTERNAL_SERVER_ERROR)
             return
@@ -570,8 +580,8 @@ class UplinkHandler(BaseHTTPRequestHandler):
         seq = _seq_counter.next()
         try:
             flags = _auth_level_flag_bits(UPLINK_CLASS_RECOVERY)
-            frame = _build_lora_frame(seq, payload, UPLINK_CLASS_RECOVERY, flags)
-            _queue_uplink(frame)
+            frame = _build_lora_frame(seq, payload, UPLINK_CLASS_RECOVERY, flags)  # 로그용(retx=0 사본)
+            _queue_uplink(seq, payload, UPLINK_CLASS_RECOVERY, flags)
         except Exception as e:
             self._json({"error": str(e)}, HTTPStatus.INTERNAL_SERVER_ERROR)
             return

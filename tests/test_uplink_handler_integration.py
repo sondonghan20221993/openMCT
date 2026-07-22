@@ -184,5 +184,48 @@ class RecoveryEndpointTest(UplinkHandlerTestBase):
         self.assertEqual(status, 400)
 
 
+class RetxIndexFlushTest(UplinkHandlerTestBase):
+    """BL-14(2026-07-22): 4x 슬롯 재전송 사본마다 Flags bits[2:1]=RETX_IDX(0~3)가
+    실리고, flags가 달라진 만큼 CRC도 사본별로 재계산돼야 한다
+    (mission_app_runtime_spec.md §18.4.3.1)."""
+
+    def _capture_flush_all(self):
+        sent = []
+        original = srv._lora_send
+        srv._lora_send = sent.append
+        try:
+            for _ in range(srv._UPLINK_RETX):
+                srv._flush_pending_uplink()
+        finally:
+            srv._lora_send = original
+        return sent
+
+    def test_each_slot_carries_incrementing_retx_idx_and_valid_crc(self):
+        status, _ = self._post("/api/uplink/config",
+                                {"scope": "cfs_core", "param": "attitude_timeout_ms", "value": 500})
+        self.assertEqual(status, 200)
+
+        sent = self._capture_flush_all()
+        self.assertEqual(len(sent), srv._UPLINK_RETX)
+
+        for i, frame in enumerate(sent):
+            parts = frame.split(",")
+            # UP,<ver>,<class>,<seq>,<flags>,<payload_hex>,<crc>
+            flags = int(parts[4])
+            self.assertEqual((flags >> srv._RETX_IDX_SHIFT) & srv._RETX_IDX_MASK, i,
+                             f"slot {i + 1}: RETX_IDX mismatch in {frame}")
+            canonical = ",".join(parts[:-1])
+            self.assertEqual(int(parts[-1], 16), srv._crc16(canonical.encode("ascii")),
+                             f"slot {i + 1}: CRC not recomputed for {frame}")
+
+        # RETX_IDX 외 비트(auth level 등)는 사본 간 동일해야 함
+        base_masks = {int(f.split(",")[4]) & ~(srv._RETX_IDX_MASK << srv._RETX_IDX_SHIFT)
+                      for f in sent}
+        self.assertEqual(len(base_masks), 1)
+
+        with srv._pending_lock:
+            self.assertEqual(len(srv._pending_uplink), 0)
+
+
 if __name__ == "__main__":
     unittest.main()
