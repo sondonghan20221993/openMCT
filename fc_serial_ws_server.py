@@ -111,6 +111,7 @@ UPLINK_PROTOCOL_VERSION = 1
 UPLINK_CLASS_CONFIG       = 1
 UPLINK_CLASS_ROUTE_UPDATE = 2
 UPLINK_CLASS_RECOVERY     = 4
+UPLINK_CLASS_DIAGNOSTIC   = 6  # waypoint readback(2026-07-23) 계기로 신설 — 기존 LINK_STATUS 등도 이걸로 처음 송신 가능해짐
 UPLINK_CLASS_COUNTER_MGMT = 7  # BL-CTR(2026-07-22), mission_app_runtime_spec.md §18.4.6.7
 
 # §18.4.6.7 counter management scope — 기체 UPLINK_APP_CounterScope_t와 동일 값
@@ -121,6 +122,20 @@ COUNTER_SCOPES = {
     "lora_tdm": 4,
 }
 COUNTER_ACTION_RESET = 0  # 현재 유일하게 허용되는 action
+
+# DIAGNOSTIC_CMD_TLM_t.DiagTarget — lora_protocol_v2_spec.md §4.3.
+# Payload[0]=DiagAction, Payload[1]=DiagTarget, Payload[2..5]=RequestToken(LE)
+# (uplink_app_utils.c UPLINK_APP_ForwardDiagnosticCommand와 동일 레이아웃).
+DIAG_TARGET_LORA_TDM = 0  # 기본값(하위호환) — LINK_STATUS/RX_STATS/TX_STATS
+DIAG_TARGET_CFS_CORE = 1  # waypoint readback(2026-07-23)
+
+DIAG_ACTIONS = {
+    # (target, action_name): action_code — LORA_TDM_APP_DiagAction_t / CFS_CORE_APP_DiagAction_t
+    (DIAG_TARGET_LORA_TDM, "link_status"): 0,
+    (DIAG_TARGET_LORA_TDM, "rx_stats"):    1,
+    (DIAG_TARGET_LORA_TDM, "tx_stats"):    2,
+    (DIAG_TARGET_CFS_CORE, "route_readback"): 3,  # CFS_CORE_APP_DIAG_ACTION_ROUTE_READBACK_REQUEST
+}
 
 # mission_app_runtime_spec.md §18.10.2 — UP 프레임 flags 필드 비트0.
 # 벤치 테스트 전용: health gate(§18.10.1)를 이 명령 하나만 우회.
@@ -135,6 +150,7 @@ UPLINK_CLASS_REQUIRED_LEVEL = {
     UPLINK_CLASS_ROUTE_UPDATE: 2,
     UPLINK_CLASS_RECOVERY: 3,
     UPLINK_CLASS_COUNTER_MGMT: 3,  # §18.4.6.7 — Level 3 (request_token≠0 필수)
+    UPLINK_CLASS_DIAGNOSTIC: 1,    # uplink_app_cmds.c GetClassRequiredLevel과 동일(진단 조회는 저권한)
 }
 
 
@@ -583,6 +599,8 @@ class UplinkHandler(BaseHTTPRequestHandler):
             self._handle_resend(body)
         elif self.path == "/api/uplink/counter":
             self._handle_counter(body)
+        elif self.path == "/api/uplink/diagnostic":
+            self._handle_diagnostic(body)
         else:
             self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
 
@@ -737,6 +755,44 @@ class UplinkHandler(BaseHTTPRequestHandler):
 
         print(f"[UP] COUNTER seq={seq} scope={scope_name}({scope}) token={request_token:#010x}  queued  frame={frame}")
         self._json({"ok": True, "seq": seq, "scope": scope_name, "action": "reset",
+                    "request_token": request_token, "transport": "lora", "queued": True})
+
+    def _handle_diagnostic(self, body: dict):
+        # DIAGNOSTIC class(6) — 여태 지상에 송신 경로가 전혀 없었음(2026-07-23
+        # waypoint readback 작업 중 발견). payload = DiagAction(1) + DiagTarget(1)
+        # + RequestToken(4, LE) — uplink_app_utils.c UPLINK_APP_ForwardDiagnosticCommand
+        # 파싱 순서(Payload[0]=Action, [1]=Target, [2..5]=Token)와 반드시 일치해야 함.
+        target_name = body.get("target")
+        action_name = body.get("action")
+
+        target = {"lora_tdm": DIAG_TARGET_LORA_TDM, "cfs_core": DIAG_TARGET_CFS_CORE}.get(target_name)
+        if target is None:
+            self._json({"error": f"unknown target '{target_name}'",
+                        "available": ["lora_tdm", "cfs_core"]}, HTTPStatus.BAD_REQUEST)
+            return
+
+        action = DIAG_ACTIONS.get((target, action_name))
+        if action is None:
+            available = sorted(a for (t, a) in DIAG_ACTIONS if t == target)
+            self._json({"error": f"unknown action '{action_name}' for target '{target_name}'",
+                        "available": available}, HTTPStatus.BAD_REQUEST)
+            return
+
+        request_token = _generate_request_token()
+        payload = bytes([action, target]) + request_token.to_bytes(4, "little")
+
+        seq = _seq_counter.next()
+        try:
+            flags = _auth_level_flag_bits(UPLINK_CLASS_DIAGNOSTIC)
+            frame = _build_lora_frame(seq, payload, UPLINK_CLASS_DIAGNOSTIC, flags)  # 로그용(retx=0 사본)
+            _queue_uplink(seq, payload, UPLINK_CLASS_DIAGNOSTIC, flags)
+        except Exception as e:
+            self._json({"error": str(e)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+
+        print(f"[UP] DIAGNOSTIC seq={seq} target={target_name}({target}) action={action_name}({action}) "
+              f"token={request_token:#010x}  queued  frame={frame}")
+        self._json({"ok": True, "seq": seq, "target": target_name, "action": action_name,
                     "request_token": request_token, "transport": "lora", "queued": True})
 
     def _handle_resend(self, body: dict):

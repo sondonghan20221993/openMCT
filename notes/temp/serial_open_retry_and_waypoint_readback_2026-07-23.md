@@ -42,6 +42,25 @@ CLI 플래그 신설(`kill_stale_server_processes()`). PowerShell
   자동 재시도 없음(지상이 DIAGNOSTIC 요청 재전송으로 처리, 단순화 결정).
 - `tests/test_lora_protocol_v2_waypoint.py` 신규 8케이스, 전부 PASS.
 
-**미완**: GUI 패널(현재는 로직만, 화면 표시 없음), `fc_serial_ws_server.py`에
-실제 배선(RouteReadbackAssembler 인스턴스화 + WS 브로드캐스트)은 아직
-안 함 — Pi 실기 검증 때 필요하면 이어서.
+## 3. DIAGNOSTIC 클래스(6) 지상 송신 경로 신설 (실기 검증 중 발견)
+
+Pi 실기 검증(BL-40 RESTART 3종 PASS 확인 후) 도중 waypoint readback 요청을
+보내려다 발견: **DIAGNOSTIC 클래스(class=6) 자체가 지상에 한 번도 구현된
+적이 없었음** — 기존 LINK_STATUS/RX_STATS/TX_STATS(lora_tdm_app)도, 오늘
+추가한 ROUTE_READBACK_REQUEST(cfs_core_app)도 보낼 방법이 없었음. spec
+§4.3/본 문서 "미완" 항목에는 "GUI 패널 없음"으로만 기록돼 있었는데, 실제로는
+그보다 근본적으로 **송신 API 자체가 없는 상태**였음(정정).
+
+**수정**: `fc_serial_ws_server.py`에 `UPLINK_CLASS_DIAGNOSTIC=6` 신설,
+`_handle_counter`와 동일 payload 구조(action(1)+target(1)+token(4) LE —
+`uplink_app_utils.c ForwardDiagnosticCommand` 파싱 순서와 일치 확인)로
+`_handle_diagnostic()` 핸들러 + `/api/uplink/diagnostic` 엔드포인트 추가.
+`DIAG_TARGET_LORA_TDM=0`/`DIAG_TARGET_CFS_CORE=1`, `DIAG_ACTIONS` 매핑
+(`route_readback`→3 등). `UPLINK_CLASS_REQUIRED_LEVEL[DIAGNOSTIC]=1`
+(C측 `GetClassRequiredLevel` case DIAGNOSTIC→1과 일치 확인, level 3 아니라
+request_token 필수 아님).
+
+**미완**: GUI 버튼(uplinkGUI/plugin.js)·CLI 명령(uplinkCLI/plugin.js)은
+아직 없음 — 지금은 HTTP API(`/api/uplink/diagnostic`)로만 호출 가능.
+`RouteReadbackAssembler` 인스턴스화 + WS 브로드캐스트(수신 페이지 재조립
+결과를 지상 화면에 표시)도 아직 안 됨.
