@@ -374,6 +374,27 @@ def autodetect_serial_port(with_retry: bool = False, retry_interval: int = 5) ->
         time.sleep(retry_interval)
 
 
+def _open_serial_with_retry(serial_port: str, baudrate: int, with_retry: bool = True,
+                             retry_interval: int = 5) -> "serial.Serial":
+    """포트를 찾았어도 다른 프로세스가 점유 중이면(PermissionError 등) 즉시
+    죽지 않고 계속 재탐색하도록 — autodetect_serial_port의 재시도 정책과
+    동일 스타일(2026-07-23, 사용자 지시로 open() 단계에도 재시도 확대)."""
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            ser = serial.Serial(serial_port, baudrate, timeout=1)
+            if attempt > 1:
+                print(f"[SERIAL] ✅ 포트 열기 성공 (시도 #{attempt})")
+            return ser
+        except serial.SerialException as exc:
+            if not with_retry:
+                raise
+            print(f"[SERIAL] ⏳ 포트 열기 실패 (시도 #{attempt}): {exc}. "
+                  f"{retry_interval}초 후 재시도... (다른 프로그램이 점유 중일 수 있음)")
+            time.sleep(retry_interval)
+
+
 def _lora_send_bytes(data: bytes) -> None:
     with _serial_write_lock:
         _ser.write(data)
@@ -945,7 +966,7 @@ async def main_async(serial_port: str, baudrate: int, http_port: int, enable_lor
     if serial_port.lower() == "auto":
         serial_port = autodetect_serial_port(with_retry=enable_lora_retry, retry_interval=5)
     print(f"[SERIAL] opening {serial_port} @ {baudrate}")
-    _ser = serial.Serial(serial_port, baudrate, timeout=1)
+    _ser = _open_serial_with_retry(serial_port, baudrate, with_retry=enable_lora_retry, retry_interval=5)
 
     # CSV 초기화
     _init_csv()

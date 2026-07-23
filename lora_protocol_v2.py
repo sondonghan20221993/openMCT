@@ -32,6 +32,10 @@ DL2_SYSTIME_BLOCK_LEN = 8
 DL2_TAIL_LEN = 3           # uplink_last_seq(u16)+uplink_boot_count(u8) — BL-03(2026-07-22), SysTime 뒤/CRC 앞
 DL2_FLAG_SYSTIME = 0x01
 DL2_FLAG_POS_SATURATED = 0x02
+# waypoint readback(2026-07-23, spec §4.3) — 꼬리 필드 뒤/CRC 앞, SysTime과 독립 첨부 가능
+DL2_FLAG_WAYPOINT = 0x04
+DL2_WAYPOINT_BLOCK_LEN = 28  # route_type+page_index+total_pages+waypoints_in_page(1×4) + waypoint[2]×12
+DL2_WAYPOINTS_PER_PAGE = 2
 
 ANGLE_SCALE = 1.0e4        # i16 rad*1e4
 CM = 100.0
@@ -75,10 +79,19 @@ class Dl2Frame:
     sys_time_unix_usec: Optional[int] = None
     uplink_last_seq: int = 0    # BL-03(2026-07-22): 기체가 마지막 수락한 uplink seq — 지상 자가복구용
     uplink_boot_count: int = 0  # BL-03: 기체 부팅 카운터(uint8 wrap) — 재부팅 감지용
+    # waypoint readback(2026-07-23, spec §4.3) — 페이지 있으면 채워짐, 없으면 None
+    wp_route_type: Optional[int] = None
+    wp_page_index: Optional[int] = None
+    wp_total_pages: Optional[int] = None
+    wp_waypoints: Optional[List[tuple]] = None  # [(x,y,z), ...] 이 페이지에 담긴 것만(1~2개)
 
     @property
     def pos_saturated(self) -> bool:
         return bool(self.flags & DL2_FLAG_POS_SATURATED)
+
+    @property
+    def has_waypoint_page(self) -> bool:
+        return bool(self.flags & DL2_FLAG_WAYPOINT)
 
 
 @dataclass
@@ -114,6 +127,15 @@ def decode_dl2(frame: bytes) -> Dl2Frame:
     if len(frame) >= tail_offset + DL2_TAIL_LEN + 2:
         (uplink_last_seq, uplink_boot_count) = struct.unpack_from("<HB", frame, tail_offset)
 
+    wp_route_type = wp_page_index = wp_total_pages = None
+    wp_waypoints: Optional[List[tuple]] = None
+    wp_offset = tail_offset + DL2_TAIL_LEN
+    if flags & DL2_FLAG_WAYPOINT and len(frame) >= wp_offset + DL2_WAYPOINT_BLOCK_LEN + 2:
+        (wp_route_type, wp_page_index, wp_total_pages, wp_in_page) = struct.unpack_from(
+            "<BBBB", frame, wp_offset)
+        raw = struct.unpack_from("<ffffff", frame, wp_offset + 4)
+        wp_waypoints = [(raw[0], raw[1], raw[2]), (raw[3], raw[4], raw[5])][:max(wp_in_page, 0)]
+
     return Dl2Frame(
         seq=seq, flags=flags, ufb=ufb, ts_ms=ts_ms,
         roll_rad=angles[0] / ANGLE_SCALE,
@@ -125,6 +147,8 @@ def decode_dl2(frame: bytes) -> Dl2Frame:
         fix=fix, sats=sats, health=health, fault=fault, linkstate=linkstate,
         sys_time_unix_usec=sys_time,
         uplink_last_seq=uplink_last_seq, uplink_boot_count=uplink_boot_count,
+        wp_route_type=wp_route_type, wp_page_index=wp_page_index,
+        wp_total_pages=wp_total_pages, wp_waypoints=wp_waypoints,
     )
 
 
@@ -133,7 +157,11 @@ def encode_dl2(frame: Dl2Frame) -> bytes:
     flags = frame.flags
     if frame.sys_time_unix_usec is not None:
         flags |= DL2_FLAG_SYSTIME
+    if frame.wp_waypoints is not None:
+        flags |= DL2_FLAG_WAYPOINT
     body_len = DL2_BASE_LEN + (DL2_SYSTIME_BLOCK_LEN if frame.sys_time_unix_usec is not None else 0) + DL2_TAIL_LEN
+    if frame.wp_waypoints is not None:
+        body_len += DL2_WAYPOINT_BLOCK_LEN
 
     buf = bytearray()
     buf += struct.pack("<BBHBBI", DL2_MAGIC, body_len, frame.seq, flags, frame.ufb, frame.ts_ms)
@@ -154,6 +182,11 @@ def encode_dl2(frame: Dl2Frame) -> bytes:
     if frame.sys_time_unix_usec is not None:
         buf += struct.pack("<Q", frame.sys_time_unix_usec)
     buf += struct.pack("<HB", frame.uplink_last_seq & 0xFFFF, frame.uplink_boot_count & 0xFF)
+    if frame.wp_waypoints is not None:
+        wps = list(frame.wp_waypoints) + [(0.0, 0.0, 0.0)] * (2 - len(frame.wp_waypoints))
+        buf += struct.pack("<BBBB", frame.wp_route_type or 0, frame.wp_page_index or 0,
+                           frame.wp_total_pages or 0, len(frame.wp_waypoints))
+        buf += struct.pack("<ffffff", *wps[0], *wps[1])
     buf += struct.pack("<H", crc16_ccitt(bytes(buf)))
     return bytes(buf)
 
@@ -192,6 +225,49 @@ def decode_up2(frame: bytes) -> Up2Frame:
     (version, command_class, seq, flags) = struct.unpack_from("<BBHB", frame, 2)
     payload = bytes(frame[7:7 + plen])
     return Up2Frame(version=version, command_class=command_class, seq=seq, flags=flags, payload=payload)
+
+
+class RouteReadbackAssembler:
+    """waypoint readback(2026-07-23, spec §4.3) 페이지 재조립.
+
+    Dl2Frame.has_waypoint_page인 이벤트를 순서대로 feed()에 넣으면
+    page_index로 재조립하고, total_pages만큼 모이면 완료. 페이지 누락
+    (재시작 등)은 자동 재시도 없음 — 지상이 DIAGNOSTIC 요청을 재전송해야
+    함(spec §4.3 "단순화" 결정).
+    """
+
+    def __init__(self) -> None:
+        self.route_type: Optional[int] = None
+        self.total_pages: Optional[int] = None
+        self._pages: dict = {}
+
+    def feed(self, event: Dl2Frame) -> Optional[List[tuple]]:
+        """완료되면 waypoint (x,y,z) 리스트(순서대로) 반환, 아니면 None."""
+        if not event.has_waypoint_page or event.wp_waypoints is None:
+            return None
+
+        if self.total_pages != event.wp_total_pages:
+            # 새 readback 세션 시작(또는 첫 수신) — 이전 진행분 폐기
+            self._pages = {}
+            self.route_type = event.wp_route_type
+            self.total_pages = event.wp_total_pages
+
+        self._pages[event.wp_page_index] = event.wp_waypoints
+
+        if self.total_pages and len(self._pages) >= self.total_pages:
+            waypoints: List[tuple] = []
+            for i in range(self.total_pages):
+                if i not in self._pages:
+                    return None  # 페이지 누락 — 아직 미완료
+                waypoints.extend(self._pages[i])
+            return waypoints
+        return None
+
+    @property
+    def progress(self) -> str:
+        if self.total_pages is None:
+            return "0/0"
+        return "%d/%d" % (len(self._pages), self.total_pages)
 
 
 class DownlinkStream:
@@ -239,7 +315,7 @@ class DownlinkStream:
             return None, 0
         body_len = buf[1]
         min_len = DL2_BASE_LEN + DL2_TAIL_LEN
-        max_len = DL2_BASE_LEN + DL2_SYSTIME_BLOCK_LEN + DL2_TAIL_LEN
+        max_len = DL2_BASE_LEN + DL2_SYSTIME_BLOCK_LEN + DL2_TAIL_LEN + DL2_WAYPOINT_BLOCK_LEN
         if body_len < min_len or body_len > max_len:
             return DecodeError("bad DL2 len %d" % body_len), 1
         total = body_len + 2  # + CRC16
