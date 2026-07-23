@@ -153,3 +153,37 @@ seq=11에 대해 `command blocked by health state=1 class=1`만 있고
 
 **임시 완화책**: 지상에서 명령을 보낼 때 다른 명령(자동화 스크립트
 등)과 동시에 보내지 않을 것 — 이번 세션 한정 회피책, 근본 해결 아님.
+
+### 7.1 재현 2 — seq=12(force+CONFIG) "UFB=3 차단" 오탐, C단 원인 확정
+
+같은 세션에서 seq=12(force 체크 후 CONFIG downlink_protocol=1)를
+보냈을 때 GUI에 `[🚫 UFB=3] 헬스 게이트에 막힘`이 떴으나, Pi
+`journalctl` 로그는 정반대로 성공을 보여줌:
+```
+FORCED THROUGH health gate (state=1 class=1 seq=12)
+routed uplink class=1 seq=12 target=1 payload_len=12 retx=0
+exec result seq=12 source_app=3 class=1 generic=0 detail=0   ← OK
+```
+이번엔 §7의 오탐과 **반대 방향**(성공을 실패로 오표시) — 같은
+구조적 버그가 양방향으로 나타남을 확인.
+
+**C단에서 근본 원인 확정** (`lora_tdm_app/fsw/src/lora_tdm_app.c`
+287~297행 주석):
+- `PendingUplinkFeedback`(=downlink `uplink_fb` 필드)은 **래치(latch)
+  값** — 매 다운링크 사이클(수백ms 주기)마다 무조건 재전송되고,
+  **새 명령이 실제로 포워딩될 때만 리셋**됨(`ProcessUpFrame` /
+  `ForwardUp2ToUplinkApp`에서). 즉 "이번 사이클 응답"이 아니라
+  "가장 최근 확정된 판정값이 다음 명령 전까지 계속 반복 전송"되는
+  구조 — 지상국이 여러 사이클에 걸쳐 안정적으로 관측하게 하려고
+  2026-07-21에 의도적으로 이렇게 설계됨(레이스 방지 목적).
+- 반면 GUI `onUFBReceived()`는 **seq 상관관계 없이** "명령 전송 후
+  최초로 도착하는 `uplink_fb` 값"을 무조건 그 명령의 결과로 간주.
+  seq=12를 보낸 직후, 아직 SB 라운드트립이 끝나지 않아
+  `PendingUplinkFeedback`이 갱신되기 전이면, **직전 seq=11 거부
+  판정값(UFB=3)이 래치된 채로 재전송되는 다운링크 틱**을 GUI가
+  먼저 받아 seq=12 결과로 오매칭함. 실제 seq=12의 진짜 UFB(성공)가
+  나중에 도착했을 때는 이미 `pendingCommand=null`이라 무시됨 —
+  §7과 동일한 구조, 트리거만 다름(동시 명령 대신 "직전 명령의
+  래치된 잔여값").
+- 근본 수정 방향은 §7과 동일(seq 상관관계 매칭, v2 `uplink_last_seq`
+  필드 활용) — 아직 미착수.
