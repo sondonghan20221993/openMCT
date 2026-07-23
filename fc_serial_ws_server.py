@@ -24,7 +24,7 @@ import serial
 from serial.tools import list_ports
 import websockets
 
-from lora_protocol_v2 import DownlinkStream, Dl2Frame, V1Line, DecodeError, build_ack2
+from lora_protocol_v2 import DownlinkStream, Dl2Frame, V1Line, DecodeError, build_ack2, RouteReadbackAssembler
 
 # ---------------------------------------------------------------------------
 # WebSocket state
@@ -981,6 +981,12 @@ def dl2_frame_to_data(frame: Dl2Frame) -> dict:
     }
     if frame.sys_time_unix_usec is not None:
         data["sys_time_unix_usec"] = frame.sys_time_unix_usec
+    if frame.has_waypoint_page:
+        print(f"[WP] page {frame.wp_page_index}/{frame.wp_total_pages - 1} "
+              f"route_type={frame.wp_route_type} waypoints={frame.wp_waypoints}")
+        result = _route_readback.feed(frame)
+        if result is not None:
+            print(f"[WP] ✅ readback complete — {len(result)} waypoints: {result}")
     return data
 
 # ---------------------------------------------------------------------------
@@ -1023,6 +1029,7 @@ def _send_ack(seq) -> None:
 
 
 _downlink_stream = DownlinkStream()
+_route_readback = RouteReadbackAssembler()  # waypoint readback(2026-07-23) 최소 배선 — 완료 시 콘솔 출력
 
 
 async def serial_reader():
