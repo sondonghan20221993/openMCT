@@ -15,6 +15,18 @@
 `retry_interval`(5초)마다 계속 재시도, autodetect와 동일한 로그 스타일.
 `main_async()`의 `serial.Serial()` 직접 호출을 이걸로 교체.
 
+**부가**: 실제로 COM7이 점유돼 있던 원인이 죽지 않고 남아있던 이전
+`fc_serial_ws_server.py` 인스턴스(PID)였음을 확인 — `--kill-stale`
+CLI 플래그 신설(`kill_stale_server_processes()`). PowerShell
+`Get-CimInstance Win32_Process`로 자기 자신의 PID(`os.getpid()`)를
+제외한 동일 스크립트 프로세스를 찾아 `taskkill /F`. **주의(실측으로
+발견)**: 처음엔 `CommandLine -match script_name`만으로 걸렀는데, 이
+필터 자체를 실행하는 PowerShell 하위 프로세스의 CommandLine에도 검색
+패턴 문자열이 그대로 들어있어 **자기 자신을 오탐**하는 버그가 있었음 —
+`Name LIKE 'python%'`로 먼저 걸러 수정. Windows 전용(다른 OS는
+아무 것도 안 하고 반환). 외부 의존성(psutil 등) 추가 없이 PowerShell만
+사용. 실측: PID 23684(구 인스턴스) 정상 종료 확인.
+
 ## 2. waypoint readback 지상 디코더 지원 (BL 관련, cfs-telemetry-app 측
    `lora_protocol_v2_spec.md` §4.3 참조)
 

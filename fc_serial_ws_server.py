@@ -9,8 +9,11 @@ import asyncio
 import csv
 import json
 import os
+import platform
 import random
 import struct
+import subprocess
+import sys
 import threading
 import time
 from datetime import datetime
@@ -372,6 +375,61 @@ def autodetect_serial_port(with_retry: bool = False, retry_interval: int = 5) ->
         # 재시도 모드: 계속 기다리기
         print(f"[SERIAL] ⏳ LoRa 모듈 미감지 (시도 #{attempt}). {retry_interval}초 후 재시도... 사용 가능: {avail}")
         time.sleep(retry_interval)
+
+
+def kill_stale_server_processes() -> int:
+    """이 스크립트(fc_serial_ws_server.py)의 이전 인스턴스가 좀비로 남아
+    COM 포트를 점유하는 경우를 위한 정리 — --kill-stale 플래그
+    (2026-07-23, 사용자 지시). Windows 전용(PowerShell Win32_Process 조회);
+    다른 OS에서는 아무 것도 하지 않고 0 반환.
+
+    psutil 등 외부 의존성 추가 없이 PowerShell만으로 구현 — 이 프로젝트
+    다른 곳(Pi SSH 명령 등)에서도 이미 subprocess로 powershell.exe를
+    호출하는 관례와 동일.
+    """
+    if platform.system() != "Windows":
+        print("[KILL-STALE] Windows 전용 기능 — 건너뜀")
+        return 0
+
+    self_pid = os.getpid()
+    script_name = os.path.basename(__file__)
+    # Name -match 'python'로 먼저 걸러야 함 — CommandLine만으로 매칭하면
+    # 이 조회 자체를 실행하는 powershell.exe 하위 프로세스의 CommandLine에도
+    # 검색 패턴 문자열이 그대로 포함돼 있어 자기 자신을 오탐하는 문제가 있었음
+    # (2026-07-23, 실측으로 발견).
+    ps_cmd = (
+        "Get-CimInstance Win32_Process -Filter \"Name LIKE 'python%'\" | "
+        f"Where-Object {{ $_.CommandLine -match '{script_name}' }} | "
+        "Select-Object -ExpandProperty ProcessId"
+    )
+    try:
+        result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-Command", ps_cmd],
+            capture_output=True, text=True, timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        print(f"[KILL-STALE] 프로세스 조회 실패: {exc}")
+        return 0
+
+    killed = 0
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if not line.isdigit():
+            continue
+        pid = int(line)
+        if pid == self_pid:
+            continue
+        try:
+            subprocess.run(["taskkill.exe", "/PID", str(pid), "/F"],
+                          capture_output=True, timeout=10, check=False)
+            print(f"[KILL-STALE] 이전 인스턴스 종료: PID {pid}")
+            killed += 1
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            print(f"[KILL-STALE] PID {pid} 종료 실패: {exc}")
+
+    if killed == 0:
+        print("[KILL-STALE] 종료할 이전 인스턴스 없음")
+    return killed
 
 
 def _open_serial_with_retry(serial_port: str, baudrate: int, with_retry: bool = True,
@@ -1000,7 +1058,12 @@ if __name__ == "__main__":
     p.add_argument("--baud",      type=int, default=57600, help="baud rate (default: 57600)")
     p.add_argument("--http-port", type=int, default=8082,  help="uplink HTTP port (default: 8082)")
     p.add_argument("--no-lora-retry", action="store_true", help="LoRa 모듈 탐지 실패 시 재시도하지 않고 즉시 종료")
+    p.add_argument("--kill-stale", action="store_true",
+                    help="시작 전 이 스크립트의 이전 인스턴스를 종료(COM 포트 점유 정리, Windows 전용)")
     args = p.parse_args()
+
+    if args.kill_stale:
+        kill_stale_server_processes()
 
     enable_lora_retry = not args.no_lora_retry
     asyncio.run(main_async(args.port, args.baud, args.http_port, enable_lora_retry))
