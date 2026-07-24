@@ -116,13 +116,23 @@ class LoraProtocolV2SyncTest(unittest.TestCase):
     @unittest.skipUnless(_CFS_ROOT, "cfs-telemetry-app repo가 형제 디렉터리에 없음")
     def test_dl2_base_len_matches_c_header(self):
         """BL-26(2026-07-21): DL2_BASE_LEN이 기체 C 헤더
-        (LORA_TDM_APP_DL2_LEN_FIELD)와 실제로 일치하는지 확인 —
+        (LORA_TDM_APP_DL2_BASE_LEN)와 실제로 일치하는지 확인 —
         자기 자신과의 비교(위 테스트)만으로는 크로스 repo 드리프트를
-        못 잡음."""
+        못 잡음.
+
+        정정(2026-07-24): BL-03(2026-07-22)에서 C 헤더가 리팩터되며
+        `LORA_TDM_APP_DL2_LEN_FIELD`가 "45바이트 기본 길이"에서
+        "기본 + tail(uplink_last_seq/boot_count)"로 의미가 바뀌어
+        `(BASE_LEN + TAIL_LEN)` 연산식이 됨 — 정수 리터럴만 파싱하는
+        `_parse_c_define`이 매칭 실패해 `python3 -m unittest discover`로
+        전체 스위트를 돌릴 때만 드러나는 조용한 실패 상태였음(개별
+        `pytest tests/test_uplink_handler_integration.py` 실행으로는
+        미노출). 45바이트 기본 길이를 그대로 갖고 있는
+        `LORA_TDM_APP_DL2_BASE_LEN`으로 대상 정정."""
         header = os.path.join(
             _CFS_ROOT, "lora_tdm_app", "fsw", "inc", "lora_tdm_app_interface_cfg.h"
         )
-        c_value = _parse_c_define(header, "LORA_TDM_APP_DL2_LEN_FIELD")
+        c_value = _parse_c_define(header, "LORA_TDM_APP_DL2_BASE_LEN")
         self.assertEqual(DL2_BASE_LEN, c_value)
 
 
