@@ -836,22 +836,24 @@ class UplinkHandler(BaseHTTPRequestHandler):
             self._json({"error": "waypoint_start_index must be uint8"}, HTTPStatus.BAD_REQUEST)
             return
 
+        force = bool(body.get("force", False))
         request_token = _generate_request_token()
         payload = bytes([mode, waypoint_start_index]) + request_token.to_bytes(4, "little")
 
         seq = _seq_counter.next()
         try:
-            flags = _auth_level_flag_bits(UPLINK_CLASS_FLIGHT_MODE)
+            flags = _auth_level_flag_bits(UPLINK_CLASS_FLIGHT_MODE) | (UPLINK_FORCE_FLAG if force else 0)
             frame = _build_lora_frame(seq, payload, UPLINK_CLASS_FLIGHT_MODE, flags)  # 로그용(retx=0 사본)
             _queue_uplink(seq, payload, UPLINK_CLASS_FLIGHT_MODE, flags)
         except Exception as e:
             self._json({"error": str(e)}, HTTPStatus.INTERNAL_SERVER_ERROR)
             return
 
+        force_tag = " [FORCE]" if force else ""
         print(f"[UP] FLIGHT_MODE seq={seq} mode={mode_name}({mode}) waypoint_idx={waypoint_start_index} "
-              f"token={request_token:#010x}  queued  frame={frame}")
+              f"token={request_token:#010x}{force_tag}  queued  frame={frame}")
         self._json({"ok": True, "seq": seq, "mode": mode_name, "waypoint_start_index": waypoint_start_index,
-                    "request_token": request_token, "transport": "lora", "queued": True})
+                    "request_token": request_token, "force": force, "transport": "lora", "queued": True})
 
     def _handle_resend(self, body: dict):
         # BL-24(2026-07-22): UFB=1 자동 재전송용 — 새 seq를 발급하지 않고

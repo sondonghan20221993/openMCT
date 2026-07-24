@@ -381,6 +381,23 @@ class FlightModeEndpointTest(UplinkHandlerTestBase):
                                   {"mode": "waypoint", "waypoint_start_index": 256})
         self.assertEqual(status, 400)
 
+    def test_force_flag_sets_force_bit(self):
+        status, data = self._post("/api/uplink/flight_mode",
+                                  {"mode": "waypoint", "waypoint_start_index": 1, "force": True})
+        self.assertEqual(status, 200)
+        self.assertTrue(data["force"])
+        with srv._pending_lock:
+            _seq, _payload, _cls, flags, _remaining = srv._pending_uplink[0]
+        self.assertEqual(flags & srv.UPLINK_FORCE_FLAG, srv.UPLINK_FORCE_FLAG)
+
+    def test_default_force_is_false_and_bit_unset(self):
+        status, data = self._post("/api/uplink/flight_mode", {"mode": "hover"})
+        self.assertEqual(status, 200)
+        self.assertFalse(data["force"])
+        with srv._pending_lock:
+            _seq, _payload, _cls, flags, _remaining = srv._pending_uplink[0]
+        self.assertEqual(flags & srv.UPLINK_FORCE_FLAG, 0)
+
 
 class RouteReadbackStatusEndpointTest(UplinkHandlerTestBase):
     """0x1913 waypoint readback 왕복 상태 조회(GET) — spec §4.3 "미완(후속 검토):

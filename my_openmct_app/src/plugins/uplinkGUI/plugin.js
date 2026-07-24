@@ -400,12 +400,14 @@ export default function uplinkGUIPlugin(serverUrl = DEFAULT_SERVER) {
                 async function sendFlightMode() {
                     const mode = els.flightMode.value;
                     const waypointIndex = mode === 'waypoint' ? Number(els.flightModeWpIndex.value || 0) : 0;
+                    const force = !!(els.flightModeForce && els.flightModeForce.checked);
                     try {
                         const json = await postJSON('/api/uplink/flight_mode',
-                            { mode, waypoint_start_index: waypointIndex });
+                            { mode, waypoint_start_index: waypointIndex, force });
                         if (json.ok) {
                             log(`[OK] FLIGHT_MODE ${mode} sent  seq=${json.seq}` +
-                                (mode === 'waypoint' ? `  wp_idx=${waypointIndex}` : ''), 'ug-ok');
+                                (mode === 'waypoint' ? `  wp_idx=${waypointIndex}` : '') +
+                                (force ? '  [FORCE]' : ''), 'ug-ok');
                             const describe = () => `flight_mode ${mode}`;
                             const resend = () => postJSON('/api/uplink/resend', { seq: json.seq }).catch(() => { });
                             armPendingCommand('flight_mode', json.seq, describe, resend);
@@ -604,6 +606,9 @@ export default function uplinkGUIPlugin(serverUrl = DEFAULT_SERVER) {
                                     <label>wp index</label>
                                     <input class="ug-num" type="number" min="0" max="255" step="1" data-el="flightModeWpIndex" placeholder="0" value="0">
                                     <span class="hint">WAYPOINT 전용 — MISSION_SET_CURRENT 대상 인덱스</span>
+                                </div>
+                                <div class="ug-row">
+                                    <label><input type="checkbox" data-el="flightModeForce"> ⚠️ force (bench-only, health gate 우회 — WAYPOINT에만 영향)</label>
                                     <button class="ug-send" data-el="sendFlightMode" type="button">FLIGHT MODE 전송</button>
                                 </div>
                             </div>
