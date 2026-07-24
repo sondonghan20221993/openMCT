@@ -100,4 +100,26 @@
       정상·오류 케이스 + 공통(health/meta/404/잘못된 JSON/OPTIONS) 20개 케이스
 - [x] 로컬 실행 검증 — 단독 20/20 PASS, 전체 스위트(1차 26 + 2차 20) 46/46 PASS,
       상호 간섭 없음 확인
-- [ ] 커밋 + push
+- [x] 커밋 + push
+
+## 3차 범위 — COUNTER/FLIGHT_MODE/RouteReadback 추가 (2026-07-22~24, 이 문서 갱신 누락분 정리)
+
+이 문서가 2차(46개) 이후 갱신되지 않아 실제 테스트 스위트와 어긋나 있던 것을
+2026-07-24에 정리. 그동안 `tests/test_uplink_handler_integration.py`에 아래가
+추가·커밋됨(전부 동일한 `ThreadingHTTPServer` 실통합테스트 패턴):
+
+- **COUNTER**(class 7, §18.4.6.7, 2026-07-22): `CounterEndpointTest` — 4개 scope
+  전송 성공, 알 수 없는 scope 400
+- **FLIGHT_MODE**(class 8, BL-44 §18.4.6.8, 2026-07-24): `FlightModeEndpointTest` —
+  HOVER/WAYPOINT(+waypoint_start_index)/LAND 정상, 알 수 없는 mode 400,
+  HOVER·LAND에 waypoint_start_index≠0 거부, uint8 범위초과 400 (7개)
+- **RouteReadbackStatus**(0x1913 readback GUI 노출, 2026-07-24): `RouteReadbackStatusEndpointTest` —
+  idle/pending/complete 상태 전이, waypoint 재조립 결과 확인 (3개)
+
+### 상태
+
+- [x] COUNTER 테스트 추가·커밋(2026-07-22)
+- [x] FLIGHT_MODE 테스트 추가·커밋(2026-07-24, 커밋 `2d455a0`)
+- [x] RouteReadbackStatus 테스트 추가·커밋(2026-07-24, 커밋 `2d455a0`)
+- [x] 로컬 실행 검증 — 전체 스위트 38/38 PASS
+- [x] 이 계획 문서 갱신(누락분 정리)
