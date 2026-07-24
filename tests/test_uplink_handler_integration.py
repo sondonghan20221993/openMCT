@@ -322,5 +322,113 @@ class CounterEndpointTest(UplinkHandlerTestBase):
         self.assertIn("available", data)
 
 
+class FlightModeEndpointTest(UplinkHandlerTestBase):
+    """BL-44(2026-07-24, §18.4.6.8): flight mode base 명령(class 8) 전송 —
+    payload = flight_mode(1)+waypoint_start_index(1)+request_token(4,LE), Level 3."""
+
+    def test_hover_queues_class8_frame(self):
+        status, data = self._post("/api/uplink/flight_mode", {"mode": "hover"})
+        self.assertEqual(status, 200)
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["mode"], "hover")
+        self.assertEqual(data["waypoint_start_index"], 0)
+        self.assertNotEqual(data["request_token"], 0)
+
+        with srv._pending_lock:
+            self.assertEqual(len(srv._pending_uplink), 1)
+            seq, payload, cmd_class, flags, _remaining = srv._pending_uplink[0]
+
+        self.assertEqual(cmd_class, srv.UPLINK_CLASS_FLIGHT_MODE)
+        self.assertEqual(len(payload), 6)
+        self.assertEqual(payload[0], srv.FLIGHT_MODES["hover"])
+        self.assertEqual(payload[1], 0)
+        self.assertEqual(int.from_bytes(payload[2:6], "little"), data["request_token"])
+        # Level 3 → flags bits[7:6] = 3
+        self.assertEqual((flags >> 6) & 0x3, 3)
+
+    def test_waypoint_with_start_index(self):
+        status, data = self._post("/api/uplink/flight_mode",
+                                  {"mode": "waypoint", "waypoint_start_index": 7})
+        self.assertEqual(status, 200)
+        with srv._pending_lock:
+            _seq, payload, _cls, _flags, _remaining = srv._pending_uplink[0]
+        self.assertEqual(payload[0], srv.FLIGHT_MODES["waypoint"])
+        self.assertEqual(payload[1], 7)
+
+    def test_land_accepted(self):
+        status, data = self._post("/api/uplink/flight_mode", {"mode": "land"})
+        self.assertEqual(status, 200)
+        self.assertTrue(data["ok"])
+
+    def test_unknown_mode_400(self):
+        status, data = self._post("/api/uplink/flight_mode", {"mode": "bogus"})
+        self.assertEqual(status, 400)
+        self.assertIn("available", data)
+
+    def test_nonzero_waypoint_index_rejected_for_hover(self):
+        status, data = self._post("/api/uplink/flight_mode",
+                                  {"mode": "hover", "waypoint_start_index": 3})
+        self.assertEqual(status, 400)
+        self.assertIn("error", data)
+
+    def test_nonzero_waypoint_index_rejected_for_land(self):
+        status, data = self._post("/api/uplink/flight_mode",
+                                  {"mode": "land", "waypoint_start_index": 1})
+        self.assertEqual(status, 400)
+
+    def test_waypoint_index_out_of_uint8_range_400(self):
+        status, data = self._post("/api/uplink/flight_mode",
+                                  {"mode": "waypoint", "waypoint_start_index": 256})
+        self.assertEqual(status, 400)
+
+
+class RouteReadbackStatusEndpointTest(UplinkHandlerTestBase):
+    """0x1913 waypoint readback 왕복 상태 조회(GET) — spec §4.3 "미완(후속 검토):
+    ground 측 GUI 패널" 항목. RouteReadbackAssembler(lora_protocol_v2.py)가 이미
+    파싱/재조립하지만 콘솔 출력만 하던 것을 모듈 상태로 노출."""
+
+    def setUp(self):
+        super().setUp()
+        srv._route_readback = srv.RouteReadbackAssembler()
+        srv._route_readback_state.update({
+            "status": "idle", "route_type": None, "progress": "0/0",
+            "waypoints": None, "updated_ms": None,
+        })
+
+    def _fake_frame(self, page_index, total_pages, waypoints, route_type=1):
+        return srv.Dl2Frame(
+            seq=0, flags=srv.DL2_FLAG_WAYPOINT, ufb=0, ts_ms=0,
+            roll_rad=0.0, pitch_rad=0.0, yaw_rad=0.0,
+            x_m=0.0, y_m=0.0, z_m=0.0, vx_mps=0.0, vy_mps=0.0, vz_mps=0.0,
+            lat_e7=0, lon_e7=0, alt_mm=0, fix=0, sats=0,
+            health=0, fault=0, linkstate=0,
+            sys_time_unix_usec=None, uplink_last_seq=0, uplink_boot_count=0,
+            wp_route_type=route_type, wp_page_index=page_index,
+            wp_total_pages=total_pages, wp_waypoints=waypoints,
+        )
+
+    def test_idle_before_any_readback(self):
+        status, data = self._get("/api/uplink/route_readback")
+        self.assertEqual(status, 200)
+        self.assertEqual(data["status"], "idle")
+
+    def test_pending_after_partial_pages(self):
+        srv.dl2_frame_to_data(self._fake_frame(0, 2, [(0.0, -10.0, 3.0), (2.0, -10.0, 3.0)]))
+        status, data = self._get("/api/uplink/route_readback")
+        self.assertEqual(status, 200)
+        self.assertEqual(data["status"], "pending")
+        self.assertEqual(data["progress"], "1/2")
+
+    def test_complete_after_all_pages(self):
+        srv.dl2_frame_to_data(self._fake_frame(0, 2, [(0.0, -10.0, 3.0), (2.0, -10.0, 3.0)]))
+        srv.dl2_frame_to_data(self._fake_frame(1, 2, [(4.0, -10.0, 3.0)]))
+        status, data = self._get("/api/uplink/route_readback")
+        self.assertEqual(status, 200)
+        self.assertEqual(data["status"], "complete")
+        self.assertEqual(data["route_type"], 1)
+        self.assertEqual(len(data["waypoints"]), 3)
+        self.assertEqual(data["waypoints"][2], [4.0, -10.0, 3.0])
+
+
 if __name__ == "__main__":
     unittest.main()

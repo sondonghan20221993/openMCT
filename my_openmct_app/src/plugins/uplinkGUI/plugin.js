@@ -204,6 +204,11 @@ export default function uplinkGUIPlugin(serverUrl = DEFAULT_SERVER) {
                         // 명령의 scope/action 오류 또는 Level 3 인가 차단
                         log(`[❌ UFB=0x0C] counter management 거부 (scope/action 오류 또는 인가 차단) — ${pendingCommand.describe()}`, 'ug-err');
                         clearPendingCommand();
+                    } else if (ufb === 13) {
+                        // cfs-telemetry-app BL-44(2026-07-24, §18.4.6.8): flight mode
+                        // payload(flight_mode/waypoint_start_index) 오류
+                        log(`[❌ UFB=0x0D] flight mode 거부 (mode/waypoint_index 오류) — ${pendingCommand.describe()}`, 'ug-err');
+                        clearPendingCommand();
                     }
                 }
 
@@ -391,6 +396,85 @@ export default function uplinkGUIPlugin(serverUrl = DEFAULT_SERVER) {
                     }
                 }
 
+                // --- FLIGHT_MODE 전송 (BL-44, class 8, §18.4.6.8) ---
+                async function sendFlightMode() {
+                    const mode = els.flightMode.value;
+                    const waypointIndex = mode === 'waypoint' ? Number(els.flightModeWpIndex.value || 0) : 0;
+                    try {
+                        const json = await postJSON('/api/uplink/flight_mode',
+                            { mode, waypoint_start_index: waypointIndex });
+                        if (json.ok) {
+                            log(`[OK] FLIGHT_MODE ${mode} sent  seq=${json.seq}` +
+                                (mode === 'waypoint' ? `  wp_idx=${waypointIndex}` : ''), 'ug-ok');
+                            const describe = () => `flight_mode ${mode}`;
+                            const resend = () => postJSON('/api/uplink/resend', { seq: json.seq }).catch(() => { });
+                            armPendingCommand('flight_mode', json.seq, describe, resend);
+                        } else {
+                            log(`[ERR] ${json.error}`, 'ug-err');
+                        }
+                    } catch (e) {
+                        log(`[ERR] server unreachable (${serverUrl}): ${e.message}`, 'ug-err');
+                    }
+                }
+
+                // --- DIAGNOSTIC 전송 (class 6) — waypoint readback 트리거 포함 ---
+                const DIAG_ACTIONS_BY_TARGET = {
+                    lora_tdm: ['link_status', 'rx_stats', 'tx_stats'],
+                    cfs_core: ['route_readback'],
+                };
+
+                function rebuildDiagActionOptions() {
+                    const target = els.diagTarget.value;
+                    const actions = DIAG_ACTIONS_BY_TARGET[target] || [];
+                    els.diagAction.innerHTML = actions.map((a) => `<option value="${a}">${a}</option>`).join('');
+                }
+
+                // route_readback(cfs_core, 0x1913 왕복)만 완료까지 폴링해 결과 표시.
+                // spec §4.3 "미완: ground 측 GUI 패널" — RouteReadbackAssembler(서버)는
+                // 이미 파싱/재조립하지만 콘솔 로그만 남기던 것을 GET으로 노출해 여기서 표시.
+                async function pollRouteReadback() {
+                    const started = Date.now();
+                    const timeoutMs = 5000;
+                    while (Date.now() - started < timeoutMs) {
+                        await new Promise((r) => setTimeout(r, 500));
+                        try {
+                            const st = await (await fetch(`${serverUrl}/api/uplink/route_readback`)).json();
+                            if (st.status === 'pending') {
+                                log(`[…] route readback 진행 중  ${st.progress}`, 'ug-info');
+                            } else if (st.status === 'complete') {
+                                log(`[✅] route readback 완료  route_type=${st.route_type}  ` +
+                                    `waypoints=${JSON.stringify(st.waypoints)}`, 'ug-ok');
+                                return;
+                            }
+                        } catch (e) {
+                            break;
+                        }
+                    }
+                    log(`[⚠️] route readback 응답 시간초과(>5s) — 링크 확인 필요`, 'ug-warn');
+                }
+
+                async function sendDiagnostic() {
+                    const target = els.diagTarget.value;
+                    const action = els.diagAction.value;
+                    try {
+                        const json = await postJSON('/api/uplink/diagnostic', { target, action });
+                        if (json.ok) {
+                            log(`[OK] DIAGNOSTIC ${target}/${action} sent  seq=${json.seq}`, 'ug-ok');
+                            const describe = () => `diagnostic ${target}/${action}`;
+                            const resend = () => postJSON('/api/uplink/resend', { seq: json.seq }).catch(() => { });
+                            armPendingCommand('diagnostic', json.seq, describe, resend);
+                            if (target === 'cfs_core' && action === 'route_readback') {
+                                pollRouteReadback();
+                            }
+                        } else {
+                            const hint = json.available ? `  available: ${json.available.join(', ')}` : '';
+                            log(`[ERR] ${json.error}${hint}`, 'ug-err');
+                        }
+                    } catch (e) {
+                        log(`[ERR] server unreachable (${serverUrl}): ${e.message}`, 'ug-err');
+                    }
+                }
+
                 function addWaypointRow(x = '', y = '', z = '') {
                     const rows = els.wpList.querySelectorAll('.ug-wp').length;
                     if (rows >= MAX_WAYPOINTS) { log(`[ERR] 최대 ${MAX_WAYPOINTS}개까지`, 'ug-err'); return; }
@@ -506,6 +590,38 @@ export default function uplinkGUIPlugin(serverUrl = DEFAULT_SERVER) {
                                 </div>
                             </div>
 
+                            <div class="ug-panel">
+                                <h3>Flight Mode <span style="font-weight:normal;opacity:.7">(class 8, §18.4.6.8, BL-44)</span></h3>
+                                <div class="ug-row">
+                                    <label>mode</label>
+                                    <select class="ug-select" data-el="flightMode">
+                                        <option value="hover">HOVER (제자리 대기 — health gate 예외)</option>
+                                        <option value="waypoint">WAYPOINT (경로 비행 — health gate 정상 적용)</option>
+                                        <option value="land">LAND (착륙 — health gate 예외)</option>
+                                    </select>
+                                </div>
+                                <div class="ug-row">
+                                    <label>wp index</label>
+                                    <input class="ug-num" type="number" min="0" max="255" step="1" data-el="flightModeWpIndex" placeholder="0" value="0">
+                                    <span class="hint">WAYPOINT 전용 — MISSION_SET_CURRENT 대상 인덱스</span>
+                                    <button class="ug-send" data-el="sendFlightMode" type="button">FLIGHT MODE 전송</button>
+                                </div>
+                            </div>
+
+                            <div class="ug-panel">
+                                <h3>Diagnostic <span style="font-weight:normal;opacity:.7">(class 6)</span></h3>
+                                <div class="ug-row">
+                                    <label>target</label>
+                                    <select class="ug-select" data-el="diagTarget">
+                                        <option value="lora_tdm">lora_tdm</option>
+                                        <option value="cfs_core">cfs_core</option>
+                                    </select>
+                                    <label>action</label>
+                                    <select class="ug-select" data-el="diagAction"></select>
+                                    <button class="ug-send" data-el="sendDiagnostic" type="button">DIAGNOSTIC 전송</button>
+                                </div>
+                            </div>
+
                             <div class="ug-log" data-el="log"></div>
                         `;
 
@@ -522,7 +638,11 @@ export default function uplinkGUIPlugin(serverUrl = DEFAULT_SERVER) {
                         els.sendRoute.addEventListener('click', sendRoute);
                         els.sendRecovery.addEventListener('click', sendRecovery);
                         els.sendCounter.addEventListener('click', sendCounter);
+                        els.sendFlightMode.addEventListener('click', sendFlightMode);
+                        els.diagTarget.addEventListener('change', rebuildDiagActionOptions);
+                        els.sendDiagnostic.addEventListener('click', sendDiagnostic);
 
+                        rebuildDiagActionOptions();
                         rebuildParamOptions();
                         addWaypointRow('0', '-10', '3');   // 예시 웨이포인트 1개
                         container.appendChild(root);

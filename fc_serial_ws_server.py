@@ -24,7 +24,8 @@ import serial
 from serial.tools import list_ports
 import websockets
 
-from lora_protocol_v2 import DownlinkStream, Dl2Frame, V1Line, DecodeError, build_ack2, RouteReadbackAssembler
+from lora_protocol_v2 import (DownlinkStream, Dl2Frame, V1Line, DecodeError, build_ack2,
+                              RouteReadbackAssembler, DL2_FLAG_WAYPOINT)
 
 # ---------------------------------------------------------------------------
 # WebSocket state
@@ -113,6 +114,14 @@ UPLINK_CLASS_ROUTE_UPDATE = 2
 UPLINK_CLASS_RECOVERY     = 4
 UPLINK_CLASS_DIAGNOSTIC   = 6  # waypoint readback(2026-07-23) 계기로 신설 — 기존 LINK_STATUS 등도 이걸로 처음 송신 가능해짐
 UPLINK_CLASS_COUNTER_MGMT = 7  # BL-CTR(2026-07-22), mission_app_runtime_spec.md §18.4.6.7
+UPLINK_CLASS_FLIGHT_MODE  = 8  # BL-44(2026-07-24), mission_app_runtime_spec.md §18.4.6.8
+
+# §18.4.6.8 flight mode payload — 기체 UPLINK_APP_FlightMode_t와 동일 값
+FLIGHT_MODES = {
+    "hover": 0,
+    "waypoint": 1,
+    "land": 2,
+}
 
 # §18.4.6.7 counter management scope — 기체 UPLINK_APP_CounterScope_t와 동일 값
 COUNTER_SCOPES = {
@@ -151,6 +160,8 @@ UPLINK_CLASS_REQUIRED_LEVEL = {
     UPLINK_CLASS_RECOVERY: 3,
     UPLINK_CLASS_COUNTER_MGMT: 3,  # §18.4.6.7 — Level 3 (request_token≠0 필수)
     UPLINK_CLASS_DIAGNOSTIC: 1,    # uplink_app_cmds.c GetClassRequiredLevel과 동일(진단 조회는 저권한)
+    UPLINK_CLASS_FLIGHT_MODE: 3,   # §18.4.6.8 — Level 3(request_token≠0 필수). HOVER/LAND는 기체측
+                                   # health gate 예외지만 auth level 요구사항은 동일하게 3
 }
 
 
@@ -582,6 +593,8 @@ class UplinkHandler(BaseHTTPRequestHandler):
                 "transport": "lora",
                 "boot_count_anomaly": _boot_count_tracker.anomaly,  # BL-03: 감소 감지 시 운영자 확인 필요
             })
+        elif self.path == "/api/uplink/route_readback":
+            self._json(dict(_route_readback_state))
         else:
             self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
 
@@ -601,6 +614,8 @@ class UplinkHandler(BaseHTTPRequestHandler):
             self._handle_counter(body)
         elif self.path == "/api/uplink/diagnostic":
             self._handle_diagnostic(body)
+        elif self.path == "/api/uplink/flight_mode":
+            self._handle_flight_mode(body)
         else:
             self._json({"error": "not found"}, HTTPStatus.NOT_FOUND)
 
@@ -795,6 +810,49 @@ class UplinkHandler(BaseHTTPRequestHandler):
         self._json({"ok": True, "seq": seq, "target": target_name, "action": action_name,
                     "request_token": request_token, "transport": "lora", "queued": True})
 
+    def _handle_flight_mode(self, body: dict):
+        # BL-44(2026-07-24, §18.4.6.8): flight mode base 명령(class 8).
+        # payload = flight_mode(1) + waypoint_start_index(1) + request_token(4, LE)
+        # — uplink_app_utils.c UPLINK_APP_ParseFlightModePayload 파싱 순서와 일치해야 함.
+        mode_name = body.get("mode")
+        mode = FLIGHT_MODES.get(mode_name)
+        if mode is None:
+            self._json({"error": f"unknown mode '{mode_name}'",
+                        "available": sorted(FLIGHT_MODES)}, HTTPStatus.BAD_REQUEST)
+            return
+
+        try:
+            waypoint_start_index = int(body.get("waypoint_start_index", 0))
+        except (TypeError, ValueError):
+            self._json({"error": "waypoint_start_index must be integer"}, HTTPStatus.BAD_REQUEST)
+            return
+
+        if mode != FLIGHT_MODES["waypoint"] and waypoint_start_index != 0:
+            self._json({"error": "waypoint_start_index must be 0 unless mode='waypoint'"},
+                       HTTPStatus.BAD_REQUEST)
+            return
+
+        if not (0 <= waypoint_start_index <= 0xFF):
+            self._json({"error": "waypoint_start_index must be uint8"}, HTTPStatus.BAD_REQUEST)
+            return
+
+        request_token = _generate_request_token()
+        payload = bytes([mode, waypoint_start_index]) + request_token.to_bytes(4, "little")
+
+        seq = _seq_counter.next()
+        try:
+            flags = _auth_level_flag_bits(UPLINK_CLASS_FLIGHT_MODE)
+            frame = _build_lora_frame(seq, payload, UPLINK_CLASS_FLIGHT_MODE, flags)  # 로그용(retx=0 사본)
+            _queue_uplink(seq, payload, UPLINK_CLASS_FLIGHT_MODE, flags)
+        except Exception as e:
+            self._json({"error": str(e)}, HTTPStatus.INTERNAL_SERVER_ERROR)
+            return
+
+        print(f"[UP] FLIGHT_MODE seq={seq} mode={mode_name}({mode}) waypoint_idx={waypoint_start_index} "
+              f"token={request_token:#010x}  queued  frame={frame}")
+        self._json({"ok": True, "seq": seq, "mode": mode_name, "waypoint_start_index": waypoint_start_index,
+                    "request_token": request_token, "transport": "lora", "queued": True})
+
     def _handle_resend(self, body: dict):
         # BL-24(2026-07-22): UFB=1 자동 재전송용 — 새 seq를 발급하지 않고
         # 캐시된 원본 명령을 같은 seq 그대로 재큐잉한다(진짜 재전송).
@@ -985,7 +1043,12 @@ def dl2_frame_to_data(frame: Dl2Frame) -> dict:
         print(f"[WP] page {frame.wp_page_index}/{frame.wp_total_pages - 1} "
               f"route_type={frame.wp_route_type} waypoints={frame.wp_waypoints}")
         result = _route_readback.feed(frame)
+        _route_readback_state["status"] = "complete" if result is not None else "pending"
+        _route_readback_state["route_type"] = _route_readback.route_type
+        _route_readback_state["progress"] = _route_readback.progress
+        _route_readback_state["updated_ms"] = ts
         if result is not None:
+            _route_readback_state["waypoints"] = [list(wp) for wp in result]
             print(f"[WP] ✅ readback complete — {len(result)} waypoints: {result}")
     return data
 
@@ -1030,6 +1093,17 @@ def _send_ack(seq) -> None:
 
 _downlink_stream = DownlinkStream()
 _route_readback = RouteReadbackAssembler()  # waypoint readback(2026-07-23) 최소 배선 — 완료 시 콘솔 출력
+
+# spec §4.3 "미완(후속 검토): ground 측 GUI 패널" — RouteReadbackAssembler는 이미
+# 파싱/재조립하지만 콘솔 출력만 하고 있었음. GET /api/uplink/route_readback으로
+# 조회 가능하게 모듈 상태로 노출(2026-07-24).
+_route_readback_state = {
+    "status": "idle",       # idle | pending | complete
+    "route_type": None,
+    "progress": "0/0",
+    "waypoints": None,      # [[x,y,z], ...] — complete일 때만 값 있음
+    "updated_ms": None,
+}
 
 
 async def serial_reader():
